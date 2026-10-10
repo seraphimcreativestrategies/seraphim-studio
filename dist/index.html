@@ -1578,7 +1578,7 @@ EXPORT TO DRIVE
 <div class="inspector-inner">
 <div class="inspector-intro">
 <h2>🧼 LAUNDER</h2>
-<p>Drop videos or images → get clean iPhone-authentic files (<b>.MOV</b> for video, <b>.HEIC</b> for stills). Strips every trace of origin metadata, optionally disrupts pixels to break the perceptual hash, and writes a coherent iPhone identity into the exact fields iOS Photos reads — device, lens, GPS, date, Apple container fields. Works on any source: AI-generated, screen-recorded, or another camera. Batch-drop as many as you like.</p>
+<p>Drop videos or images → get clean iPhone-authentic files (<b>.MOV</b> or <b>.MP4</b> for video, <b>.HEIC</b> or <b>.JPG</b> for stills — pick under OUTPUT FORMAT). Strips every trace of origin metadata, optionally disrupts pixels to break the perceptual hash, and writes a coherent iPhone identity into the exact fields iOS Photos reads — device, lens, GPS, date, Apple container fields. Works on any source: AI-generated, screen-recorded, or another camera. Batch-drop as many as you like.</p>
 </div>
 <label class="inspector-slot" id="launderDrop" style="min-height:96px;margin-bottom:16px;">
 <input type="file" hidden accept="video/*" multiple id="launderInput">
@@ -1611,10 +1611,39 @@ EXPORT TO DRIVE
 <span class="toolbar-label">DISRUPTION PRESET</span>
 <span class="seg-control" id="launderPreset" style="display:inline-flex;">
 <button type="button" class="seg-btn" data-ld-preset="gentle">GENTLE</button>
-<button type="button" class="seg-btn active" data-ld-preset="balanced">BALANCED</button>
+<button type="button" class="seg-btn" data-ld-preset="balanced">BALANCED</button>
 <button type="button" class="seg-btn" data-ld-preset="aggressive">AGGRESSIVE</button>
-<button type="button" class="seg-btn" data-ld-preset="metadata">META ONLY</button>
+<button type="button" class="seg-btn active" data-ld-preset="metadata" title="Lossless remux + full iPhone identity, no pixel re-encode (default)">META ONLY</button>
 </span>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;">
+<span class="toolbar-label">DUMP &amp; RUN</span>
+<span class="seg-control" id="launderAutoRun" style="display:inline-flex;" title="ON: files start laundering the moment they land — no RUN click needed">
+<button type="button" class="seg-btn active" data-ld-autorun="off">OFF</button>
+<button type="button" class="seg-btn" data-ld-autorun="on">⚡ ON</button>
+</span>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;">
+<span class="toolbar-label">OUTPUT FORMAT</span>
+<div style="display:flex;gap:10px;align-items:center;">
+<span class="seg-control" id="launderVideoFormat" style="display:inline-flex;" title="Container for laundered videos">
+<button type="button" class="seg-btn active" data-ld-vfmt="mov" title="QuickTime .MOV — what the iPhone camera writes (default)">🎬 MOV</button>
+<button type="button" class="seg-btn" data-ld-vfmt="mp4" title=".MP4 (mp42 brand) — same Apple identity, for platforms that insist on .mp4">MP4</button>
+</span>
+<span class="seg-control" id="launderImageFormat" style="display:inline-flex;" title="Format for laundered stills">
+<button type="button" class="seg-btn active" data-ld-ifmt="heic" title=".HEIC — the iPhone camera default (default)">🖼 HEIC</button>
+<button type="button" class="seg-btn" data-ld-ifmt="jpg" title=".JPG — iPhone &quot;Most Compatible&quot; output, same EXIF / MakerNote / ICC">JPG</button>
+</span>
+</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;max-width:340px;">
+<span class="toolbar-label">OUTPUT FOLDER</span>
+<div style="display:flex;gap:6px;align-items:center;">
+<button type="button" class="upd-action-btn" id="launderOutPick" title="Choose the folder laundered files are written to">CHOOSE</button>
+<button type="button" class="upd-action-btn" id="launderOutClear" title="Back to the default route: Settings → Default save folder if set, else Downloads">RESET</button>
+<button type="button" class="upd-action-btn" id="launderOutOpen" title="Reveal the output folder in Finder / Explorer">OPEN</button>
+</div>
+<span id="launderOutPath" style="font-size:9px;color:var(--text-faint,#8a7fa0);font-family:'JetBrains Mono',monospace;word-break:break-all;line-height:1.4;">Default · Downloads</span>
 </div>
 <button type="button" class="seg-btn" id="launderRunBtn" disabled style="margin-left:auto;align-self:flex-end;font-weight:700;letter-spacing:.12em;padding:10px 22px;">RUN LAUNDER →</button>
 </div>
@@ -9072,7 +9101,7 @@ function updateFilenamePreview() {
 // ============================================================================
 // V3.3: VIEW TAB SWITCHING (Editor / Inspector)
 // ============================================================================
-const APP_VERSION = '4.14.0';
+const APP_VERSION = '4.15.0';
 let currentView = 'editor';
 
 // Single source of truth for the header meta line. Format:
@@ -16534,6 +16563,20 @@ function _ldResolveIdentity(cfg = {}) {
 //        tz?, preset:'gentle'|'balanced'|'aggressive'|'metadata', captureDate?:Date,
 //        seed?, onStatus?(msg) }
 // Returns { blob, device, gps, whenUtc, tz } or null.
+// v4.15.0: the pipelines keep their "null on failure" contract (the editor's
+// launder export relies on it), but the batch runner wants to show WHY a file
+// failed. ffmpeg_run's Err is "ffmpeg exited Some(1)\nstderr:\n<lines>" — the
+// real reason is the last non-empty stderr line.
+let _ldLastError = '';
+function _ldNoteError(e) {
+  const lines = String(e && e.message || e || '').split('\n').map(l => l.trim()).filter(Boolean)
+    .filter(l => !/^ffmpeg exited|^stderr:$/.test(l));
+  // Prefer the specific cause over ffmpeg's generic wrap-up lines.
+  const generic = /Could not write header|Conversion failed|Error (opening|while|muxing)|^Exiting|Invalid argument$/;
+  const tail = lines.filter(l => !generic.test(l)).pop() || lines.pop() || 'unknown error';
+  _ldLastError = tail.replace(/^\[[^\]]*\]\s*/, '').slice(0, 160);
+}
+
 async function launderVideoFile(blob, cfg = {}) {
   if (!window.__TAURI__?.core?.invoke) return null;
   const { invoke } = window.__TAURI__.core;
@@ -16542,6 +16585,11 @@ async function launderVideoFile(blob, cfg = {}) {
   const preset = cfg.preset || 'balanced';
   const disrupt = preset !== 'metadata' && !!LAUNDER_PRESETS[preset];
   const status = typeof cfg.onStatus === 'function' ? cfg.onStatus : () => {};
+  // v4.15.0: OUTPUT FORMAT. 'mov' = QuickTime (qt brand) exactly as before;
+  // 'mp4' = same pipeline into an .mp4 with the mp42 major brand Apple tools
+  // write. Every later step (exiftool Keys/QuickTime tags, the box patchers,
+  // moov-to-end, the mdta track keys) is ISO-BMFF generic and applies to both.
+  const vfmt = cfg.videoFormat === 'mp4' ? 'mp4' : 'mov';
 
   const tmpDir = await invoke('make_temp_dir', { prefix: 'launder' });
   try {
@@ -16557,15 +16605,52 @@ async function launderVideoFile(blob, cfg = {}) {
       ff.push('-vf', _ldBuildVf(LAUNDER_PRESETS[preset], seed),
         '-c:v', 'libx265', '-tag:v', 'hvc1', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k');
     } else {
-      status('REMUXING TO QUICKTIME…');
-      ff.push('-map', '0', '-c', 'copy');
+      // META ONLY = stream copy. Probe the source first: `ffmpeg -i` with no
+      // output exits 1, but the stream list lands in the Err text ffmpeg_run
+      // hands back (one fast call, nothing is decoded).
+      status(vfmt === 'mp4' ? 'REMUXING TO MP4…' : 'REMUXING TO QUICKTIME…');
+      let probeText = '';
+      try { await invoke('ffmpeg_run', { args: ['-hide_banner', '-i', 'source.bin'], cwd: tmpDir }); }
+      catch (probe) { probeText = String(probe && probe.message || probe || ''); }
+      // v4.15.0: HEVC tagged hev1 (Android, most AI generators) used to copy
+      // through as hev1, which Apple Photos / QuickTime / AVFoundation refuse
+      // — they need hvc1 (parameter sets in hvcC). -tag:v hvc1 on a stream
+      // copy rewrites the sample entry. Conditional on purpose: it hard-fails
+      // on H.264. Applies to both containers.
+      const hev1 = /Video: hevc[^\n]*\(hev1 \//.test(probeText);
+      if (vfmt === 'mp4') {
+        // The MP4 muxer refuses QuickTime side tracks (tmcd timecode, mebx
+        // Core Media metadata — present in every iPhone camera .MOV and every
+        // macOS screen recording), so copy only the first video + audio
+        // stream. Audio: copy what MP4 + Apple decoders both take (AAC, MP3,
+        // AC-3, E-AC-3); anything else — PCM from pro workflows, which
+        // ffmpeg 7 would write as ISO 'ipcm' that Photos won't play — goes
+        // to AAC. The .MOV branch keeps -map 0 (every track) as before.
+        const audioArgs = /Audio: (?!aac|mp3|ac3|eac3)/.test(probeText) ? ['-c:a', 'aac', '-b:a', '160k'] : ['-c:a', 'copy'];
+        ff.push('-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'copy', ...audioArgs);
+      } else {
+        ff.push('-map', '0', '-c', 'copy');
+      }
+      if (hev1) ff.push('-tag:v', 'hvc1');
     }
-    ff.push('-brand', 'qt',
+    ff.push('-brand', vfmt === 'mp4' ? 'mp42' : 'qt',
       '-metadata:s:v:0', 'handler_name=Core Media Video',
       '-metadata:s:a:0', 'handler_name=Core Media Audio',
-      '-map_metadata', '-1', 'out.mov');
-    await invoke('ffmpeg_run', { args: ff, cwd: tmpDir });
-    const outPath = tmpDir + '/out.mov';
+      '-map_metadata', '-1', 'out.' + vfmt);
+    try {
+      await invoke('ffmpeg_run', { args: ff, cwd: tmpDir });
+    } catch (e) {
+      // v4.15.0: safety net — if the MP4 muxer still refuses a copied audio
+      // stream the probe didn't flag, retry once with audio → AAC (video is
+      // still copied untouched).
+      const ai = ff.indexOf('-c:a');
+      if (vfmt !== 'mp4' || disrupt || ai < 0 || ff[ai + 1] !== 'copy') throw e;
+      status('MP4 MUXER REFUSED THE AUDIO — RE-ENCODING AUDIO TO AAC…');
+      const ff2 = ff.slice();
+      ff2.splice(ai, 2, '-c:a', 'aac', '-b:a', '160k');
+      await invoke('ffmpeg_run', { args: ff2, cwd: tmpDir });
+    }
+    const outPath = tmpDir + '/out.' + vfmt;
 
     // 2. scrub — strip any C2PA/AI/provenance the source carried.
     status('STRIPPING SOURCE SIGNATURE…');
@@ -16583,8 +16668,9 @@ async function launderVideoFile(blob, cfg = {}) {
     const pk = _ldInjectPropVideoKeys(buf, { iris: 'F' + device.fNumber.toFixed(2), mk74: 4, mk97: 13 });
     if (pk) buf = pk;
 
-    return { blob: new Blob([buf], { type: 'video/quicktime' }), device, gps, whenUtc, tz, seed };
+    return { blob: new Blob([buf], { type: vfmt === 'mp4' ? 'video/mp4' : 'video/quicktime' }), ext: vfmt.toUpperCase(), device, gps, whenUtc, tz, seed };
   } catch (e) {
+    _ldNoteError(e);
     console.warn('[launder] video pipeline failed:', e);
     return null;
   } finally {
@@ -16671,19 +16757,29 @@ async function launderImageFile(blob, cfg = {}) {
     try { await enrichWithExiftool(jpegPath, { captureDate: whenUtc, tz }); }
     catch (e) { console.warn('[launder] exiftool enrichment failed:', e); }
     let outBytes, ext;
-    try {
-      status('CONVERTING TO HEIC…');
-      const heicPath = await invoke('jpeg_to_heic', { jpegPath });
-      await enrichHeicMakerNote(heicPath);
-      outBytes = new Uint8Array(await invoke('read_temp_file', { path: heicPath }));
-      ext = 'HEIC';
-    } catch (e) {
-      console.warn('[launder] HEIC conversion failed, shipping JPG:', e);
+    if (cfg.imageFormat === 'jpg') {
+      // v4.15.0: OUTPUT FORMAT = JPG → ship the fully tagged JPEG as-is (EXIF +
+      // MakerNote + GPS + Apple P3 ICC + exiftool Apple-only tags). This is the
+      // exact file the HEIC fallback has always shipped, now by choice.
+      status('FINALIZING JPG…');
       outBytes = new Uint8Array(await invoke('read_temp_file', { path: jpegPath }));
       ext = 'JPG';
+    } else {
+      try {
+        status('CONVERTING TO HEIC…');
+        const heicPath = await invoke('jpeg_to_heic', { jpegPath });
+        await enrichHeicMakerNote(heicPath);
+        outBytes = new Uint8Array(await invoke('read_temp_file', { path: heicPath }));
+        ext = 'HEIC';
+      } catch (e) {
+        console.warn('[launder] HEIC conversion failed, shipping JPG:', e);
+        outBytes = new Uint8Array(await invoke('read_temp_file', { path: jpegPath }));
+        ext = 'JPG';
+      }
     }
     return { blob: new Blob([outBytes], { type: ext === 'HEIC' ? 'image/heic' : 'image/jpeg' }), ext, device, gps, whenUtc, tz, seed };
   } catch (e) {
+    _ldNoteError(e);
     console.warn('[launder] image pipeline failed:', e);
     return null;
   } finally {
@@ -17928,14 +18024,37 @@ function setupInspector() {
 // picker / drop-router accept; every queued file remembers its kind and RUN
 // dispatches it to launderVideoFile or launderImageFile. Device / GPS /
 // disruption preset apply to both kinds.
+// v4.15.0: META ONLY is the default preset on every launch. + DUMP & RUN
+// (files start the moment they land; the runner drains the queue so mid-batch
+// drops are picked up), OUTPUT FORMAT (video MOV|MP4, image HEIC|JPG — passed
+// to the pipelines as cfg.videoFormat / cfg.imageFormat) and an OUTPUT FOLDER
+// (written via save_export_to_path).
 // ============================================================================
+// DUMP & RUN + OUTPUT persist in their own key. Deliberately NOT in PREFS:
+// launderState and setupLaunderTab() both evaluate before `const PREFS`
+// (init() → bindEvents() → setupLaunderTab() runs ahead of the PREFS
+// declaration), so reading PREFS here is a temporal-dead-zone ReferenceError
+// that would abort init — the same failure class as the v4.13.2 hotfix.
+const LAUNDER_PREFS_KEY = 'snapcap_launder_prefs';
+const _launderSavedPrefs = (() => {
+  try { const raw = localStorage.getItem(LAUNDER_PREFS_KEY); const v = raw ? JSON.parse(raw) : null; return (v && typeof v === 'object') ? v : {}; }
+  catch (_) { return {}; }
+})();
+function saveLaunderPrefs() {
+  try { localStorage.setItem(LAUNDER_PREFS_KEY, JSON.stringify({ autoRun: !!launderState.autoRun, outDir: launderState.outDir || '', videoFormat: launderState.videoFormat, imageFormat: launderState.imageFormat })); }
+  catch (_) {}
+}
 const launderState = {
   files: [],            // [{ id, file, kind:'video'|'image', status, statusText }]
   mode: 'video',        // 'video' | 'image' — what the dropzone accepts (v4.14.0)
   deviceId: LAUNDER_DEFAULT_DEVICE,
   gpsMode: 'city',      // 'off' | 'random' | 'city'
   gpsCity: LAUNDER_DEFAULT_CITY,
-  preset: 'balanced',   // 'gentle' | 'balanced' | 'aggressive' | 'metadata'
+  preset: 'metadata',   // 'gentle' | 'balanced' | 'aggressive' | 'metadata' — v4.15.0: META ONLY every launch (not persisted on purpose)
+  autoRun: _launderSavedPrefs.autoRun === true,                                            // v4.15.0: DUMP & RUN
+  outDir: typeof _launderSavedPrefs.outDir === 'string' ? _launderSavedPrefs.outDir : '', // v4.15.0: '' = default route (deliverBlob)
+  videoFormat: _launderSavedPrefs.videoFormat === 'mp4' ? 'mp4' : 'mov',                   // v4.15.0: OUTPUT FORMAT — 'mov' | 'mp4'
+  imageFormat: _launderSavedPrefs.imageFormat === 'jpg' ? 'jpg' : 'heic',                  // v4.15.0: OUTPUT FORMAT — 'heic' | 'jpg'
   running: false,
 };
 
@@ -17988,10 +18107,16 @@ function _ldFileKind(f) {
 // Per-mode dropzone copy + picker filter (v4.14.0).
 const LAUNDER_MODE_UI = {
   video: { label: 'VIDEOS', accept: 'video/*,.mp4,.mov,.m4v,.webm,.mkv',
-           title: '+ DROP VIDEOS', hint: 'or click to choose · MP4 · MOV · M4V · WEBM · drop as many as you like · out: .MOV' },
+           title: '+ DROP VIDEOS', hint: 'or click to choose · MP4 · MOV · M4V · WEBM · drop as many as you like' },
   image: { label: 'IMAGES', accept: 'image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.heic,.heif,.avif,.tif,.tiff',
-           title: '+ DROP IMAGES', hint: 'or click to choose · JPG · PNG · WEBP · HEIC · GIF · drop as many as you like · out: .HEIC' },
+           title: '+ DROP IMAGES', hint: 'or click to choose · JPG · PNG · WEBP · HEIC · GIF · drop as many as you like' },
 };
+
+// v4.15.0: the extension the current OUTPUT FORMAT choice produces for a kind.
+function launderOutExt(kind) {
+  return kind === 'image' ? (launderState.imageFormat === 'jpg' ? 'JPG' : 'HEIC')
+                          : (launderState.videoFormat === 'mp4' ? 'MP4' : 'MOV');
+}
 
 // Switch VIDEOS ↔ IMAGES: updates the segmented control, the hidden file
 // input's accept filter and the dropzone copy. Already-queued files keep
@@ -18005,7 +18130,39 @@ function launderSetMode(mode) {
   const title = document.getElementById('launderDropTitle');
   if (title) title.textContent = ui.title;
   const hint = document.getElementById('launderDropHint');
-  if (hint) hint.textContent = ui.hint;
+  if (hint) hint.textContent = ui.hint + ' · out: .' + launderOutExt(launderState.mode)
+    + (launderState.autoRun ? ' · ⚡ DUMP & RUN is ON — laundering starts the moment files land' : '');
+}
+
+// v4.15.0: reflect DUMP & RUN + OUTPUT in the toolbar. Called on wire-up and
+// after every change (the HTML ships OFF / "Default" and is corrected here from
+// the persisted state).
+function launderSyncOptionsUI() {
+  document.querySelectorAll('[data-ld-autorun]').forEach(b =>
+    b.classList.toggle('active', (b.dataset.ldAutorun === 'on') === !!launderState.autoRun));
+  document.querySelectorAll('[data-ld-vfmt]').forEach(b => b.classList.toggle('active', b.dataset.ldVfmt === launderState.videoFormat));
+  document.querySelectorAll('[data-ld-ifmt]').forEach(b => b.classList.toggle('active', b.dataset.ldIfmt === launderState.imageFormat));
+  const lbl = document.getElementById('launderOutPath');
+  if (lbl) {
+    if (launderState.outDir) {
+      lbl.textContent = launderState.outDir; lbl.title = launderState.outDir;
+      lbl.style.color = 'var(--text-dim,#b4a8c8)';
+    } else {
+      lbl.textContent = 'Default · Settings save folder if set, else Downloads'; lbl.title = '';
+      lbl.style.color = 'var(--text-faint,#8a7fa0)';
+    }
+  }
+  const clr = document.getElementById('launderOutClear');
+  if (clr) clr.style.opacity = launderState.outDir ? '1' : '0.45';
+  launderSetMode(launderState.mode); // dropzone hint carries the DUMP & RUN suffix
+}
+
+// Where the OPEN button points: the LAUNDER folder, else the app-wide Settings
+// folder. Only ever called from a click handler, so PREFS is initialised by
+// then; the try/catch is belt-and-braces against the TDZ case anyway.
+function _launderResolvedOutDir() {
+  if (launderState.outDir) return launderState.outDir;
+  try { return (PREFS && PREFS.defaultExportFolder) || ''; } catch (_) { return ''; }
 }
 
 function launderAddFiles(fileList) {
@@ -18026,6 +18183,9 @@ function launderAddFiles(fileList) {
   } else if (skipped) {
     setLaunderStatus(`Skipped ${skipped} file(s): MEDIA TYPE is ${LAUNDER_MODE_UI[want].label}. Switch it to ${other} to launder them.`, 'error');
   }
+  // v4.15.0: DUMP & RUN — the drop IS the run. If a batch is already live the
+  // drain loop in runLaunderBatch picks these up; otherwise start one now.
+  if (accepted.length && launderState.autoRun && !launderState.running) runLaunderBatch({ retry: false });
   return accepted.length;
 }
 
@@ -18077,60 +18237,160 @@ function setupLaunderTab() {
   });
   launderSetMode(launderState.mode); // sync accept filter + dropzone copy on first wire-up
 
-  runBtn.addEventListener('click', runLaunderBatch);
+  // v4.15.0: DUMP & RUN segmented control (OFF | ON). Persisted.
+  document.querySelectorAll('[data-ld-autorun]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      launderState.autoRun = btn.dataset.ldAutorun === 'on';
+      saveLaunderPrefs();
+      launderSyncOptionsUI();
+      // Flipping ON with files already waiting is itself the dump — go.
+      if (launderState.autoRun && !launderState.running && launderState.files.some(f => f.status === 'queued' || f.status === 'error')) runLaunderBatch({ retry: true });
+    });
+  });
+
+  // v4.15.0: OUTPUT FORMAT — video MOV | MP4, image HEIC | JPG. Persisted.
+  // Already-queued files pick up whatever is selected when they actually run.
+  document.querySelectorAll('[data-ld-vfmt]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      launderState.videoFormat = btn.dataset.ldVfmt === 'mp4' ? 'mp4' : 'mov';
+      saveLaunderPrefs(); launderSyncOptionsUI();
+    });
+  });
+  document.querySelectorAll('[data-ld-ifmt]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      launderState.imageFormat = btn.dataset.ldIfmt === 'jpg' ? 'jpg' : 'heic';
+      saveLaunderPrefs(); launderSyncOptionsUI();
+    });
+  });
+
+  // v4.15.0: OUTPUT folder — CHOOSE / RESET / OPEN. Reuses the Rust commands
+  // Settings → Default save folder already ships (pick_export_folder,
+  // reveal_in_folder); the batch runner writes via save_export_to_path.
+  const outPick = document.getElementById('launderOutPick');
+  const outClear = document.getElementById('launderOutClear');
+  const outOpen = document.getElementById('launderOutOpen');
+  if (outPick) outPick.addEventListener('click', async () => {
+    if (!window.__TAURI__?.core?.invoke) { showToast('Folder picker only available in the desktop app.', 'error'); return; }
+    try {
+      const path = await window.__TAURI__.core.invoke('pick_export_folder');
+      if (path) {
+        launderState.outDir = path; saveLaunderPrefs(); launderSyncOptionsUI();
+        showToast('LAUNDER output → ' + path, 'success');
+      }
+    } catch (e) { showToast('Folder picker failed: ' + (e && e.message || e), 'error'); }
+  });
+  if (outClear) outClear.addEventListener('click', () => {
+    if (!launderState.outDir) return;
+    launderState.outDir = ''; saveLaunderPrefs(); launderSyncOptionsUI();
+    showToast('LAUNDER output reset to default', 'notify');
+  });
+  if (outOpen) outOpen.addEventListener('click', async () => {
+    if (!window.__TAURI__?.core?.invoke) { showToast('Only available in the desktop app.', 'error'); return; }
+    const target = _launderResolvedOutDir();
+    if (!target) { showToast('No output folder set — files go to Downloads.', 'notify'); return; }
+    try { await window.__TAURI__.core.invoke('reveal_in_folder', { path: target }); }
+    catch (e) { showToast('Could not open folder: ' + (e && e.message || e), 'error'); }
+  });
+  launderSyncOptionsUI();
+
+  runBtn.addEventListener('click', () => runLaunderBatch({ retry: true }));
 }
 
-async function runLaunderBatch() {
+// v4.15.0: opts.retry — re-queue earlier failures before draining. True from
+// the RUN button and the DUMP & RUN → ON flip (explicit intent), false from
+// auto-start on drop, so a stuck failure doesn't re-run ahead of every new
+// file you dump.
+async function runLaunderBatch(opts = {}) {
   if (launderState.running || !launderState.files.length) return;
   if (!window.__TAURI__?.core?.invoke) {
     setLaunderStatus('Launder needs the desktop app (ffmpeg + exiftool).', 'error');
     return;
   }
+  if (opts.retry) launderState.files.forEach(f => { if (f.status === 'error') { f.status = 'queued'; f.statusText = 'queued · retry'; } });
+  if (!launderState.files.some(f => f.status === 'queued')) return;
   launderState.running = true;
   const runBtn = document.getElementById('launderRunBtn');
-  runBtn.disabled = true;
+  if (runBtn) runBtn.disabled = true;
 
-  const pending = launderState.files.filter(f => f.status === 'queued' || f.status === 'error');
-  let done = 0, failed = 0;
-  for (let i = 0; i < pending.length; i++) {
-    const item = pending[i];
-    item.status = 'running'; item.statusText = 'starting…'; renderLaunderQueue();
-    setLaunderStatus(`Laundering ${i + 1}/${pending.length}: ${item.file.name}`);
-    try {
-      const deviceId = launderState.deviceId === '__random__'
-        ? LAUNDER_DEVICES[Math.floor(Math.random() * LAUNDER_DEVICES.length)].id
-        : launderState.deviceId;
-      // v4.14.0: dispatch on the file's own kind, not the current toggle — a
-      // queue built across a mode switch still runs every file correctly.
-      const isImage = item.kind === 'image';
-      const pipeline = isImage ? launderImageFile : launderVideoFile;
-      const res = await pipeline(item.file, {
-        deviceId,
-        gpsMode: launderState.gpsMode,
-        gpsCity: launderState.gpsCity,
-        preset: launderState.preset,
-        onStatus: (m) => { item.statusText = m; renderLaunderQueue(); },
-      });
-      if (!res || !res.blob) throw new Error('pipeline failed');
-      const ext = isImage ? (res.ext || 'HEIC') : 'MOV';
-      const fname = (typeof generateIphoneFilename === 'function') ? generateIphoneFilename(ext)
-        : ('IMG_' + Math.floor(1000 + Math.random() * 9000) + '.' + ext);
-      if (typeof deliverBlob === 'function') deliverBlob(res.blob, fname);
-      else { const a = document.createElement('a'); a.href = URL.createObjectURL(res.blob); a.download = fname; a.click(); }
-      item.status = 'done';
-      item.statusText = `${res.device.model} · ${res.tz}${res.gps ? ' · GPS' : ''} · ${fname}`;
-      done++;
-    } catch (e) {
-      item.status = 'error';
-      item.statusText = 'failed: ' + (e && e.message || e);
-      failed++;
+  // v4.15.0: drain loop instead of a one-shot snapshot. With DUMP & RUN on,
+  // files dropped mid-batch land as 'queued' and launderAddFiles can't start a
+  // second batch while running === true — so THIS run has to pick them up.
+  // Only 'queued' is drained (failures become 'error', never re-found), so a
+  // consistently failing file cannot spin the loop.
+  let done = 0, failed = 0, idx = 0, outDirDead = '', lastOutDir = '';
+  try {
+    for (;;) {
+      const item = launderState.files.find(f => f.status === 'queued');
+      if (!item) break;
+      idx++;
+      item.status = 'running'; item.statusText = 'starting…'; renderLaunderQueue();
+      const total = idx + launderState.files.filter(f => f.status === 'queued').length;
+      try {
+        setLaunderStatus(`Laundering ${idx}/${total}: ${item.file.name}`);
+        const deviceId = launderState.deviceId === '__random__'
+          ? LAUNDER_DEVICES[Math.floor(Math.random() * LAUNDER_DEVICES.length)].id
+          : launderState.deviceId;
+        // v4.14.0: dispatch on the file's own kind, not the current toggle — a
+        // queue built across a mode switch still runs every file correctly.
+        const isImage = item.kind === 'image';
+        const pipeline = isImage ? launderImageFile : launderVideoFile;
+        _ldLastError = '';
+        const res = await pipeline(item.file, {
+          deviceId,
+          gpsMode: launderState.gpsMode,
+          gpsCity: launderState.gpsCity,
+          preset: launderState.preset,
+          videoFormat: launderState.videoFormat,   // v4.15.0: OUTPUT FORMAT
+          imageFormat: launderState.imageFormat,
+          onStatus: (m) => { item.statusText = m; renderLaunderQueue(); },
+        });
+        if (!res || !res.blob) throw new Error(_ldLastError || 'pipeline failed');
+        const ext = res.ext || (isImage ? 'HEIC' : 'MOV');
+        const fname = (typeof generateIphoneFilename === 'function') ? generateIphoneFilename(ext)
+          : ('IMG_' + Math.floor(1000 + Math.random() * 9000) + '.' + ext);
+        // v4.15.0: OUTPUT FOLDER → write straight to disk, awaited, no per-file
+        // "Saved" modal. Collision-safe " (n)" suffixing happens Rust-side, so
+        // show the name that actually landed. Read per file like every other
+        // option, so CHOOSE / RESET mid-batch applies to the next file.
+        const outDir = launderState.outDir || '';
+        let savedTo = '';
+        if (outDir && outDir !== outDirDead) {
+          try {
+            item.statusText = 'writing to output folder…'; renderLaunderQueue();
+            const buf = new Uint8Array(await res.blob.arrayBuffer());
+            savedTo = await window.__TAURI__.core.invoke('save_export_to_path', { name: fname, bytes: Array.from(buf), dir: outDir });
+            lastOutDir = outDir;
+          } catch (e) {
+            // Dead folder (unmounted / deleted): say so once, then fall back
+            // for the rest of the batch instead of one error chime per file.
+            outDirDead = outDir;
+            console.warn('[launder] output folder write failed, default route for the rest of this batch', e);
+            showToast('LAUNDER output folder unavailable — using default save path', 'error');
+          }
+        }
+        if (!savedTo) {
+          if (typeof deliverBlob === 'function') deliverBlob(res.blob, fname);
+          else { const a = document.createElement('a'); a.href = URL.createObjectURL(res.blob); a.download = fname; a.click(); }
+        }
+        const landed = savedTo ? savedTo.split(/[\\/]/).pop() : fname;
+        item.status = 'done';
+        item.statusText = `${res.device.model} · ${res.tz}${res.gps ? ' · GPS' : ''} · ${landed}`;
+        done++;
+      } catch (e) {
+        item.status = 'error';
+        item.statusText = 'failed: ' + (e && e.message || e);
+        failed++;
+      }
+      renderLaunderQueue();
     }
-    renderLaunderQueue();
+  } finally {
+    // Whatever happens above, never leave the tab wedged with running === true
+    // (that is the only gate DUMP & RUN has).
+    launderState.running = false;
+    if (runBtn) runBtn.disabled = false;
   }
-
-  launderState.running = false;
-  runBtn.disabled = false;
-  setLaunderStatus(`✅ Laundered ${done} file(s)${failed ? ` · ${failed} failed` : ''}.`, failed ? 'error' : 'success');
+  const where = lastOutDir ? ` → ${lastOutDir}` : '';
+  setLaunderStatus(`✅ Laundered ${done} file(s)${failed ? ` · ${failed} failed` : ''}${where}.`, failed ? 'error' : 'success');
 }
 
 
@@ -19284,6 +19544,38 @@ function ensureSettingsModal() {
 // const for easy maintenance — bump APP_VERSION + add an entry on each batch.
 // ============================================================================
 const PATCH_NOTES = [
+  {
+    version: '4.15.0',
+    date: '2026-10-11',
+    title: 'LAUNDER — META ONLY by default, DUMP & RUN auto-start, OUTPUT FORMAT (MOV | MP4 · HEIC | JPG) and an OUTPUT FOLDER',
+    sections: [
+      { h: '🎛 META ONLY is now the default preset', items: [
+        '🧼 The <b>DISRUPTION PRESET</b> control now opens on <b>META ONLY</b> every launch (was BALANCED): a lossless stream-copy remux plus the full iPhone metadata / identity pass, with <b>no pixel re-encode</b>. The choice is deliberately <b>not</b> remembered between sessions so the app always starts there — GENTLE / BALANCED / AGGRESSIVE are one click away as before.',
+        '🔧 Both the HTML <code>active</code> state and the <code>launderState.preset</code> default moved together. <code>setupLaunderTab()</code> never re-syncs the preset buttons from state, so changing one without the other would have highlighted one preset and run another.',
+      ]},
+      { h: '🚀 New: DUMP & RUN toggle', items: [
+        '⚡ A new <b>OFF | ON</b> segmented control in the LAUNDER toolbar. When <b>ON</b>, anything you drop on the LAUNDER zone — or pick via the file dialog, or drop anywhere on the tab through the native Tauri drag-drop — starts laundering the moment it lands. No <b>RUN LAUNDER →</b> click.',
+        '🔁 The batch runner is now a <b>drain loop</b> instead of a one-time snapshot of the queue: files dropped while a batch is already running are picked up by that same run, instead of sitting at <code>queued</code> until the next click. Errored items are re-queued at the start of each run — same retry semantics as before.',
+        '💬 The dropzone hint switches to say files start on landing while the toggle is on. The setting persists.',
+      ]},
+      { h: '🎞 New: OUTPUT FORMAT', items: [
+        '🎬 <b>MOV | MP4</b> for videos. MOV is the QuickTime container the iPhone camera writes (unchanged default — <code>-map 0</code> keeps every track). MP4 runs the same identity chain — source scrub, Apple Keys / QuickTime tags, CompressorName + handler patches, moov-to-end, mdta track keys — into an <code>.mp4</code> with the <code>mp42</code> major brand Apple tools write, for platforms that refuse <code>.mov</code>. Because the MP4 muxer rejects QuickTime side tracks (tmcd timecode, mebx metadata — present in every iPhone camera clip), MP4 copies the first video + first audio stream only, and audio that isn\'t AAC / MP3 / AC-3 (PCM from pro workflows) is re-encoded to AAC so Photos can play it. Video is still copied bit-for-bit on META ONLY.',
+        '🖼 <b>HEIC | JPG</b> for stills. HEIC stays the default. JPG ships the fully tagged JPEG the pipeline already builds before HEIC conversion (iPhone EXIF, Apple MakerNote, GPS, OffsetTime, Display P3 ICC, exiftool Apple-only tags) — the iPhone &quot;Most Compatible&quot; look, now by choice instead of only as the HEIC-failure fallback.',
+        '💡 Both selectors sit side by side so videos and images each carry their own choice; the dropzone hint shows the live <code>out: .EXT</code> and the file list shows the extension that actually landed. Both persist.',
+      ]},
+      { h: '📂 New: OUTPUT FOLDER', items: [
+        '🗂 A new <b>OUTPUT FOLDER</b> control in the LAUNDER toolbar: the current path plus <b>CHOOSE / RESET / OPEN</b>. <b>CHOOSE</b> opens the native folder picker (the same <code>pick_export_folder</code> Rust command Settings uses). Once set, every laundered file is written straight into that folder via <code>save_export_to_path</code> — collision-safe <code>(n)</code> suffixing on name clashes, awaited sequentially, and no per-file &quot;Saved&quot; modal.',
+        '↩️ <b>RESET</b> returns to the previous behaviour: Settings → <b>Default save folder</b> if one is set, otherwise the browser download (Downloads).',
+        '🔎 <b>OPEN</b> reveals the folder in Finder / Explorer via <code>reveal_in_folder</code>, and the final status line now says where the files went. If the folder has vanished or the write fails, that file falls back to the normal download path and a warning toast tells you.',
+        '🧷 The folder persists in its own localStorage key (<code>snapcap_launder_prefs</code>), read when <code>launderState</code> is constructed. It can\'t ride on <code>PREFS</code>: <code>launderState</code> and <code>setupLaunderTab()</code> both run before <code>PREFS</code> is initialised, so touching it there would be a temporal-dead-zone throw — the same class of init-abort as the v4.13.2 hotfix.',
+      ]},
+      { h: '🔧 Under the hood', items: [
+        '🏷 META ONLY stream copy now rewrites <code>hev1</code>-tagged HEVC (Android, most AI generators) to <code>hvc1</code> on both containers. Apple Photos / QuickTime / AVFoundation refuse hev1 — they need the parameter sets in hvcC — so a laundered hev1 source previously came out unplayable in Photos. Driven by a one-shot <code>ffmpeg -i</code> probe, so H.264 sources are untouched.',
+        '🧾 Pipeline failures now surface ffmpeg\'s / exiftool\'s actual reason in the file row instead of a flat "pipeline failed".',
+        '🛡 The batch runner releases <code>running</code> in a <code>finally</code> (a throw can no longer wedge the tab), reads the OUTPUT FOLDER per file (CHOOSE / RESET mid-batch applies to the next file), reports a dead folder once per batch instead of once per file, and only re-queues earlier failures on an explicit RUN or DUMP & RUN → ON — an auto-start drop never re-runs a stuck failure ahead of the file you just dumped.',
+      ]},
+    ],
+  },
   {
     version: '4.14.0',
     date: '2026-10-10',
