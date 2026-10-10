@@ -1578,13 +1578,20 @@ EXPORT TO DRIVE
 <div class="inspector-inner">
 <div class="inspector-intro">
 <h2>🧼 LAUNDER</h2>
-<p>Drop videos → get clean iPhone-authentic <b>.MOV</b> files. Strips every trace of origin metadata, optionally disrupts pixels to break the perceptual hash, and writes a coherent iPhone identity into the exact boxes iOS Photos reads — device, lens, GPS, date, Apple container fields. Works on any source: AI-generated, screen-recorded, or another camera. Batch-drop as many as you like.</p>
+<p>Drop videos or images → get clean iPhone-authentic files (<b>.MOV</b> for video, <b>.HEIC</b> for stills). Strips every trace of origin metadata, optionally disrupts pixels to break the perceptual hash, and writes a coherent iPhone identity into the exact fields iOS Photos reads — device, lens, GPS, date, Apple container fields. Works on any source: AI-generated, screen-recorded, or another camera. Batch-drop as many as you like.</p>
 </div>
 <label class="inspector-slot" id="launderDrop" style="min-height:96px;margin-bottom:16px;">
 <input type="file" hidden accept="video/*" multiple id="launderInput">
-<div class="slot-empty"><span class="slot-add">+ DROP VIDEOS</span><span>or click to choose · MP4 · MOV · M4V · WEBM · drop as many as you like</span></div>
+<div class="slot-empty"><span class="slot-add" id="launderDropTitle">+ DROP VIDEOS</span><span id="launderDropHint">or click to choose · MP4 · MOV · M4V · WEBM · drop as many as you like</span></div>
 </label>
 <div class="inspector-toolbar" id="launderControls" style="flex-wrap:wrap;gap:20px 26px;align-items:flex-start;">
+<div style="display:flex;flex-direction:column;gap:6px;">
+<span class="toolbar-label">MEDIA TYPE</span>
+<span class="seg-control" id="launderMode" style="display:inline-flex;">
+<button type="button" class="seg-btn active" data-ld-mode="video" title="Launder videos → .MOV">🎬 VIDEOS</button>
+<button type="button" class="seg-btn" data-ld-mode="image" title="Launder stills → .HEIC">🖼 IMAGES</button>
+</span>
+</div>
 <div style="display:flex;flex-direction:column;gap:6px;">
 <span class="toolbar-label">DEVICE IDENTITY</span>
 <select id="launderDevice" style="background:var(--surface-2,#15121c);color:var(--text,#e8e2f0);border:1px solid var(--border,#2a2436);border-radius:3px;padding:6px 8px;font-family:'JetBrains Mono',monospace;font-size:11px;min-width:180px;"></select>
@@ -5056,6 +5063,19 @@ function formatExifDate(d) {
   return `${d.getFullYear()}:${pad(d.getMonth()+1)}:${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+// v4.14.0: same format, but rendered as local time in an explicit '+HH:MM'
+// zone instead of the machine's. LAUNDER picks a city → its timezone; writing
+// the machine-local wall clock with the city's OffsetTime would be a tell.
+// Falls back to formatExifDate() when tz is malformed.
+function formatExifDateInTz(d, tz) {
+  const m = (tz || '').match(/^([+-])(\d{2}):?(\d{2})$/);
+  if (!m) return formatExifDate(d);
+  const mins = (m[1] === '-' ? -1 : 1) * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
+  const l = new Date(d.getTime() + mins * 60000);
+  const pad = n => String(n).padStart(2, '0');
+  return `${l.getUTCFullYear()}:${pad(l.getUTCMonth()+1)}:${pad(l.getUTCDate())} ${pad(l.getUTCHours())}:${pad(l.getUTCMinutes())}:${pad(l.getUTCSeconds())}`;
+}
+
 // Real iPhones increment IMG_NNNN sequentially within a session. When a caller
 // is rendering a burst (carousel), it can pre-set __iphoneFilenameSeq to a
 // random base + 0 and we'll return base+0, base+1, base+2... so unzipped files
@@ -5294,9 +5314,15 @@ function ensurePiexifAppleTags() {
   piexif.TAGS.Exif._appleExtended = true;
 }
 
-function buildIphoneExif(width, height, captureDateOverride, deviceOverride) {
+// opts (optional, v4.14.0 — used by the LAUNDER image path):
+//   gps  { lat, lon, altitudeM }  explicit coordinates; overrides the editor's GPS pin
+//   tz   '+HH:MM' | '-HH:MM'       zone the capture time is written in (EXIF dates are
+//                                  rendered as local time in that zone; OffsetTime* = tz)
+function buildIphoneExif(width, height, captureDateOverride, deviceOverride, opts) {
   if (typeof piexif === 'undefined') return null;
   ensurePiexifAppleTags();
+  opts = opts || {};
+  const tz = (typeof opts.tz === 'string' && /^[+-]\d{2}:\d{2}$/.test(opts.tz)) ? opts.tz : null;
 
   // Device identity. Caller may pin a device (e.g. carousel burst must use
   // ONE iPhone across all images). Otherwise pick at random from the pool.
@@ -5309,7 +5335,7 @@ function buildIphoneExif(width, height, captureDateOverride, deviceOverride) {
   const captureDate = captureDateOverride instanceof Date
     ? captureDateOverride
     : new Date(now.getTime() + (Math.random() - 0.5) * 16 * 60 * 60 * 1000);
-  const exifDate = formatExifDate(captureDate);
+  const exifDate = tz ? formatExifDateInTz(captureDate, tz) : formatExifDate(captureDate);
 
   // Plausible randomized values
   const isoChoices = [50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 800, 1000, 1600];
@@ -5351,9 +5377,10 @@ function buildIphoneExif(width, height, captureDateOverride, deviceOverride) {
   exif[piexif.ExifIFD.SubSecTimeOriginal] = subsec;
   exif[piexif.ExifIFD.SubSecTimeDigitized] = subsec;
   // OffsetTime fields — piexifjs 1.0.6 lacks these constants, use numeric IDs
-  exif[APPLE_TAG_IDS.OffsetTime]          = '-04:00';
-  exif[APPLE_TAG_IDS.OffsetTimeOriginal]  = '-04:00';
-  exif[APPLE_TAG_IDS.OffsetTimeDigitized] = '-04:00';
+  const offsetTime = tz || '-04:00';
+  exif[APPLE_TAG_IDS.OffsetTime]          = offsetTime;
+  exif[APPLE_TAG_IDS.OffsetTimeOriginal]  = offsetTime;
+  exif[APPLE_TAG_IDS.OffsetTimeDigitized] = offsetTime;
   // Lens fields — note: LensSpecification is the proper one. LensInfo (0x9215)
   // is sometimes synthesized from this on read, so we set both for robustness.
   exif[piexif.ExifIFD.LensMake] = 'Apple';
@@ -5403,8 +5430,10 @@ function buildIphoneExif(width, height, captureDateOverride, deviceOverride) {
   // ===== GPS IFD =====
   const gps = {};
   let hasGps = false;
-  if (typeof iphoneGpsState !== 'undefined' && typeof getGpsForExport === 'function') {
-    const coords = getGpsForExport();
+  // v4.14.0: explicit coordinates (LAUNDER city / random pin) win over the editor's GPS pin.
+  const gpsOverride = (opts.gps && isFinite(opts.gps.lat) && isFinite(opts.gps.lon)) ? opts.gps : null;
+  if (gpsOverride || (typeof iphoneGpsState !== 'undefined' && typeof getGpsForExport === 'function')) {
+    const coords = gpsOverride ? [gpsOverride.lat, gpsOverride.lon] : getGpsForExport();
     if (coords) {
       const [lat, lng] = coords;
       const latRef = lat >= 0 ? 'N' : 'S';
@@ -5425,7 +5454,9 @@ function buildIphoneExif(width, height, captureDateOverride, deviceOverride) {
       gps[piexif.GPSIFD.GPSLongitudeRef] = lngRef;
       gps[piexif.GPSIFD.GPSLongitude] = toDms(lngAbs);
       gps[piexif.GPSIFD.GPSAltitudeRef] = 0;
-      gps[piexif.GPSIFD.GPSAltitude] = [Math.floor(Math.random() * 50000 + 5000), 1000];
+      gps[piexif.GPSIFD.GPSAltitude] = (gpsOverride && isFinite(gpsOverride.altitudeM))
+        ? [Math.max(0, Math.round(gpsOverride.altitudeM * 1000)), 1000]
+        : [Math.floor(Math.random() * 50000 + 5000), 1000];
       // Speed: 0 km/h (stationary, like 99% of iPhone shots)
       gps[piexif.GPSIFD.GPSSpeedRef] = 'K';
       gps[piexif.GPSIFD.GPSSpeed] = [0, 1];
@@ -5435,12 +5466,14 @@ function buildIphoneExif(width, height, captureDateOverride, deviceOverride) {
       gps[piexif.GPSIFD.GPSImgDirection] = [heading, 100];
       gps[piexif.GPSIFD.GPSDestBearingRef] = 'T';
       gps[piexif.GPSIFD.GPSDestBearing] = [heading, 100];
-      // Timestamp
-      gps[piexif.GPSIFD.GPSDateStamp] = now.toISOString().slice(0, 10).replace(/-/g, ':');
+      // Timestamp — UTC of the CAPTURE instant. Real iPhones stamp the GPS fix
+      // at shutter time; until v4.14.0 this was the export wall-clock, which
+      // drifted hours (editor) to days (launder) from DateTimeOriginal.
+      gps[piexif.GPSIFD.GPSDateStamp] = captureDate.toISOString().slice(0, 10).replace(/-/g, ':');
       gps[piexif.GPSIFD.GPSTimeStamp] = [
-        [now.getUTCHours(), 1],
-        [now.getUTCMinutes(), 1],
-        [Math.round(now.getUTCSeconds() * 100), 100]
+        [captureDate.getUTCHours(), 1],
+        [captureDate.getUTCMinutes(), 1],
+        [Math.round(captureDate.getUTCSeconds() * 100), 100]
       ];
       gps[piexif.GPSIFD.GPSHPositioningError] = [Math.floor(Math.random() * 10 + 3) * 1000, 1000];
       hasGps = true;
@@ -5619,7 +5652,8 @@ async function enrichWithExiftool(jpegPath, opts) {
   // Apple tracks "run time" as nanoseconds since iOS boot. Approximate with a
   // plausible random uptime (1h–48h before capture).
   const runTimeNanos = (Math.floor(Math.random() * 47 * 3600) + 3600) * 1e9;
-  const dateStr = (() => {
+  // v4.14.0: optional opts.tz renders the date in an explicit zone (LAUNDER city).
+  const dateStr = (opts && typeof opts.tz === 'string' && typeof formatExifDateInTz === 'function') ? formatExifDateInTz(captureDate, opts.tz) : (() => {
     const pad = (n) => String(n).padStart(2, '0');
     return `${captureDate.getFullYear()}:${pad(captureDate.getMonth() + 1)}:${pad(captureDate.getDate())} ` +
            `${pad(captureDate.getHours())}:${pad(captureDate.getMinutes())}:${pad(captureDate.getSeconds())}`;
@@ -9038,7 +9072,7 @@ function updateFilenamePreview() {
 // ============================================================================
 // V3.3: VIEW TAB SWITCHING (Editor / Inspector)
 // ============================================================================
-const APP_VERSION = '4.13.3';
+const APP_VERSION = '4.14.0';
 let currentView = 'editor';
 
 // Single source of truth for the header meta line. Format:
@@ -16468,18 +16502,16 @@ function _ldInjectPropVideoKeys(buf, opts) {
   return out;
 }
 
-// --- Video launder orchestration (launder.ts video path, Tauri-adapted) ---
-// cfg: { deviceId, gpsMode:'off'|'random'|'city'|'coord', gpsCity, gpsCoord:[lat,lon],
-//        tz?, preset:'gentle'|'balanced'|'aggressive'|'metadata', captureDate?:Date,
-//        seed?, onStatus?(msg) }
-// Returns { blob, device, gps, whenUtc, tz } or null.
-async function launderVideoFile(blob, cfg = {}) {
-  if (!window.__TAURI__?.core?.invoke) return null;
-  const { invoke } = window.__TAURI__.core;
+// --- Shared identity resolution (v4.14.0) ---
+// Used by BOTH launderVideoFile and launderImageFile so a video and a still
+// laundered with the same settings get the same kind of device / GPS / zone /
+// date story. cfg as documented on launderVideoFile below.
+// Returns { device, seed, rng, whenUtc, gps:{lat,lon,altitudeM}|null, tz:'±HH:MM' }.
+function _ldResolveIdentity(cfg = {}) {
   const device = _ldFindDevice(cfg.deviceId) || _ldFindDevice(LAUNDER_DEFAULT_DEVICE);
   const seed = (cfg.seed != null) ? cfg.seed : Math.floor(Math.random() * 0x7fffffff);
   const rng = _ldRng(seed);
-  let whenUtc = (cfg.captureDate instanceof Date && !isNaN(cfg.captureDate))
+  const whenUtc = (cfg.captureDate instanceof Date && !isNaN(cfg.captureDate))
     ? cfg.captureDate
     : new Date(Date.now() - Math.floor(rng() * 10 * 86400000)); // within last ~10 days
 
@@ -16494,6 +16526,18 @@ async function launderVideoFile(blob, cfg = {}) {
     // Explicit pin (caption export uses the editor's GPS): jitter altitude realistically.
     gps = { lat: cfg.gpsCoord[0], lon: cfg.gpsCoord[1], altitudeM: Math.max(0, 5 + (rng() - 0.5) * 40) };
   } // 'off' → gps stays null
+  return { device, seed, rng, whenUtc, gps, tz };
+}
+
+// --- Video launder orchestration (launder.ts video path, Tauri-adapted) ---
+// cfg: { deviceId, gpsMode:'off'|'random'|'city'|'coord', gpsCity, gpsCoord:[lat,lon],
+//        tz?, preset:'gentle'|'balanced'|'aggressive'|'metadata', captureDate?:Date,
+//        seed?, onStatus?(msg) }
+// Returns { blob, device, gps, whenUtc, tz } or null.
+async function launderVideoFile(blob, cfg = {}) {
+  if (!window.__TAURI__?.core?.invoke) return null;
+  const { invoke } = window.__TAURI__.core;
+  const { device, seed, whenUtc, gps, tz } = _ldResolveIdentity(cfg);
 
   const preset = cfg.preset || 'balanced';
   const disrupt = preset !== 'metadata' && !!LAUNDER_PRESETS[preset];
@@ -16546,6 +16590,178 @@ async function launderVideoFile(blob, cfg = {}) {
   } finally {
     invoke('delete_temp_file', { path: tmpDir }).catch(() => {});
   }
+}
+
+// --- Image launder orchestration (v4.14.0) ---
+// Same cfg as launderVideoFile. Pipeline:
+//   1. decode (HEIC → JPEG via the Rust converter where the WebView can't) and
+//      redraw onto a Display-P3 canvas → a clean JPEG carrying ZERO source
+//      metadata (EXIF / XMP / IPTC / C2PA-JUMBF / ICC / vendor blobs are never
+//      copied, not "removed"); EXIF orientation is baked into the pixels first.
+//   2. disruption preset ≠ META ONLY → ffmpeg single-frame pass with the SAME
+//      filter graph as video (micro-crop, lens, colour, chroma, blur/sharpen,
+//      vignette, grain) → re-encoded JPEG, breaks the perceptual hash.
+//   3. iPhone EXIF via piexif (Make/Model/Software/lens/exposure/SubjectArea/
+//      Apple MakerNote, GPS from the resolved pin, OffsetTime* in the city's
+//      zone) + Apple Display P3 ICC — the Editor/Carousel identity chain.
+//   4. exiftool Apple-only tags → sips / heif-enc HEIC → post-HEIC MakerNote
+//      re-inject. HEIC failure ships the (fully tagged) JPG instead.
+// Returns { blob, ext:'HEIC'|'JPG', device, gps, whenUtc, tz, seed } or null.
+async function launderImageFile(blob, cfg = {}) {
+  if (!window.__TAURI__?.core?.invoke) return null;
+  const { invoke } = window.__TAURI__.core;
+  const { device, seed, whenUtc, gps, tz } = _ldResolveIdentity(cfg);
+  const preset = cfg.preset || 'balanced';
+  const disrupt = preset !== 'metadata' && !!LAUNDER_PRESETS[preset];
+  const status = typeof cfg.onStatus === 'function' ? cfg.onStatus : () => {};
+
+  const tmpDir = await invoke('make_temp_dir', { prefix: 'launder-img' });
+  try {
+    // 1. decode → clean JPEG. Drawing through a canvas is the strip step: the
+    //    output bitstream is brand new, so no source segment can survive.
+    status('DECODING + STRIPPING SOURCE METADATA…');
+    const decoded = await _ldDecodeImage(blob);
+    const c = document.createElement('canvas');
+    c.width = decoded.w; c.height = decoded.h;
+    let ctx = null, p3 = false;
+    try {
+      // Display-P3 canvas so the pixel values match the Apple P3 ICC we embed
+      // (same reasoning as renderItemToBlob — see its v4.4.4 note).
+      ctx = c.getContext('2d', { colorSpace: 'display-p3' });
+      const attrs = ctx?.getContextAttributes?.();
+      if (!ctx || (attrs && attrs.colorSpace && attrs.colorSpace !== 'display-p3')) ctx = c.getContext('2d');
+      else p3 = true;
+    } catch (_) { ctx = c.getContext('2d'); }
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(decoded.img, 0, 0, decoded.w, decoded.h);
+    decoded.release();
+    let jpegBytes = new Uint8Array(await (await _ldCanvasToBlob(c, 'image/jpeg', 0.95)).arrayBuffer());
+
+    // 2. disruption — ffmpeg, one frame, same graph as the video path.
+    //    setsar=1: the micro-crop leaves a fractional SAR that ffmpeg would
+    //    write into JFIF density (5456×5455-style values — a tell). bitexact:
+    //    stops the mjpeg encoder stamping a "Lavc…" COM segment, which
+    //    -map_metadata -1 does NOT cover. Verified against the bundled binary.
+    if (disrupt) {
+      status('DISRUPTING PIXELS…');
+      await invoke('write_temp_bytes', { dir: tmpDir, name: 'in.jpg', bytes: Array.from(jpegBytes) });
+      await invoke('ffmpeg_run', { args: ['-y', '-hide_banner', '-loglevel', 'error', '-i', 'in.jpg',
+        '-vf', _ldBuildVf(LAUNDER_PRESETS[preset], seed) + ',setsar=1', '-frames:v', '1',
+        '-map_metadata', '-1', '-flags', '+bitexact',
+        '-q:v', '2', '-pix_fmt', 'yuvj420p', 'out.jpg'], cwd: tmpDir });
+      jpegBytes = new Uint8Array(await invoke('read_temp_file', { path: tmpDir + '/out.jpg' }));
+    }
+
+    // 3. iPhone EXIF + MakerNote + GPS (city pin, city zone) + Apple P3 ICC.
+    status('INJECTING APPLE IDENTITY…');
+    const dims = _ldJpegDims(jpegBytes) || { w: decoded.w, h: decoded.h };
+    const poolDev = _ldDeviceToPoolShape(device, _ldPickSoftware(device, _ldRng(seed)));
+    const exifObj = buildIphoneExif(dims.w, dims.h, whenUtc, poolDev, { gps, tz });
+    if (exifObj) {
+      const tagged = injectExifIntoJpegDataUrl(await _ldBlobToDataUrl(new Blob([jpegBytes], { type: 'image/jpeg' })), exifObj);
+      const taggedBlob = dataURLToBlob(tagged);
+      if (taggedBlob) jpegBytes = new Uint8Array(await taggedBlob.arrayBuffer());
+    }
+    if (p3 && typeof replaceJpgIccWithApple === 'function') {
+      try { jpegBytes = replaceJpgIccWithApple(jpegBytes); } catch (e) { console.warn('[launder] ICC swap failed:', e); }
+    }
+
+    // 4. Apple-only exiftool tags → HEIC → post-HEIC MakerNote. JPG fallback.
+    const jpegPath = await invoke('write_temp_bytes', { dir: tmpDir, name: 'img.jpg', bytes: Array.from(jpegBytes) });
+    try { await enrichWithExiftool(jpegPath, { captureDate: whenUtc, tz }); }
+    catch (e) { console.warn('[launder] exiftool enrichment failed:', e); }
+    let outBytes, ext;
+    try {
+      status('CONVERTING TO HEIC…');
+      const heicPath = await invoke('jpeg_to_heic', { jpegPath });
+      await enrichHeicMakerNote(heicPath);
+      outBytes = new Uint8Array(await invoke('read_temp_file', { path: heicPath }));
+      ext = 'HEIC';
+    } catch (e) {
+      console.warn('[launder] HEIC conversion failed, shipping JPG:', e);
+      outBytes = new Uint8Array(await invoke('read_temp_file', { path: jpegPath }));
+      ext = 'JPG';
+    }
+    return { blob: new Blob([outBytes], { type: ext === 'HEIC' ? 'image/heic' : 'image/jpeg' }), ext, device, gps, whenUtc, tz, seed };
+  } catch (e) {
+    console.warn('[launder] image pipeline failed:', e);
+    return null;
+  } finally {
+    invoke('delete_temp_file', { path: tmpDir }).catch(() => {});
+  }
+}
+
+// Decode any still the WebView can show (JPG/PNG/WebP/GIF/BMP/AVIF, HEIC on
+// WebKit). HEIC on Windows — or anywhere the WebView refuses — goes through the
+// Rust heic_to_jpeg converter first. Resolves { img, w, h, release() }.
+async function _ldDecodeImage(blob) {
+  const isWindows = /win/i.test(navigator.platform);
+  const heic = /^image\/hei[cf]/i.test(blob.type || '') || /\.hei[cf]$/i.test(blob.name || '');
+  const canConvert = typeof convertHeicToJpegInBrowser === 'function';
+  const load = (b) => new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(b);
+    const img = new Image();
+    img.onload = () => resolve({ img, w: img.naturalWidth, h: img.naturalHeight, release: () => URL.revokeObjectURL(url) });
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image decode failed')); };
+    img.src = url;
+  });
+  let src = blob;
+  if (heic && isWindows && canConvert) src = await convertHeicToJpegInBrowser(blob);
+  try { return await load(src); }
+  catch (e) {
+    if (src === blob && heic && canConvert) return load(await convertHeicToJpegInBrowser(blob));
+    throw e;
+  }
+}
+function _ldCanvasToBlob(c, mime, q) {
+  return new Promise((resolve, reject) => c.toBlob(b => b ? resolve(b) : reject(new Error('canvas encode failed')), mime, q));
+}
+function _ldBlobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error || new Error('read failed'));
+    r.readAsDataURL(blob);
+  });
+}
+// Width/height from a JPEG's SOF marker (the disruption crop changes dims, and
+// EXIF PixelX/YDimension must match the real frame).
+function _ldJpegDims(b) {
+  if (!b || b.length < 4 || b[0] !== 0xFF || b[1] !== 0xD8) return null;
+  let p = 2;
+  while (p + 9 < b.length) {
+    if (b[p] !== 0xFF) { p++; continue; }
+    const m = b[p + 1];
+    if (m === 0xFF) { p++; continue; }
+    if (m === 0xD8 || m === 0x01 || (m >= 0xD0 && m <= 0xD7)) { p += 2; continue; }
+    if (m === 0xD9 || m === 0xDA) return null;
+    if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC) {
+      return { h: (b[p + 5] << 8) | b[p + 6], w: (b[p + 7] << 8) | b[p + 8] };
+    }
+    p += 2 + ((b[p + 2] << 8) | b[p + 3]);
+  }
+  return null;
+}
+// Adapt a LAUNDER device profile (device-profiles.ts shape) to the
+// IPHONE_DEVICE_POOL shape buildIphoneExif() consumes. When the model also
+// exists in the pool we reuse its exact lens spec / aperture rationals (they
+// carry the ultra-wide range real iPhones report); otherwise synthesise from
+// the single-lens profile. Software (iOS version) always comes from launder.
+function _ldDeviceToPoolShape(d, software) {
+  const pool = (typeof IPHONE_DEVICE_POOL !== 'undefined') ? IPHONE_DEVICE_POOL.find(p => p.model === d.model) : null;
+  const fl = Math.round(d.focalLengthMm * 1000), fn = Math.round(d.fNumber * 100);
+  const sw = software || (pool && pool.software) || '26.5';
+  return {
+    model: d.model,
+    software: sw,
+    qtSoftware: sw,
+    lensModel: d.lensModel,
+    lensSpec: pool ? pool.lensSpec : [[fl, 1000], [fl, 1000], [fn, 100], [fn, 100]],
+    focalLength: pool ? pool.focalLength : [fl, 1000],
+    focalLength35mm: d.focalLength35,
+    fNumber: pool ? pool.fNumber : [fn, 100],
+    apertureValue: pool ? pool.apertureValue : [Math.round(2 * Math.log2(d.fNumber) * 100), 100],
+  };
 }
 
 // Caption-export entry point (kept name/signature). Metadata-only launder: the
@@ -17708,9 +17924,14 @@ function setupInspector() {
 // v4.13.0: LAUNDER TAB — batch video laundering (1:1 port of Media Studio).
 // Drop many videos → configure device / GPS (off·random·city) / disruption
 // preset → RUN. Each file runs the full launderVideoFile pipeline and downloads.
+// v4.14.0: + IMAGES mode. The MEDIA TYPE toggle decides what the dropzone /
+// picker / drop-router accept; every queued file remembers its kind and RUN
+// dispatches it to launderVideoFile or launderImageFile. Device / GPS /
+// disruption preset apply to both kinds.
 // ============================================================================
 const launderState = {
-  files: [],            // [{ id, file, status, name }]
+  files: [],            // [{ id, file, kind:'video'|'image', status, statusText }]
+  mode: 'video',        // 'video' | 'image' — what the dropzone accepts (v4.14.0)
   deviceId: LAUNDER_DEFAULT_DEVICE,
   gpsMode: 'city',      // 'off' | 'random' | 'city'
   gpsCity: LAUNDER_DEFAULT_CITY,
@@ -17739,6 +17960,7 @@ function renderLaunderQueue() {
     const badge = f.status === 'done' ? '✅' : f.status === 'error' ? '⚠' : f.status === 'queued' ? '•' : '⟳';
     return `<div style="display:flex;align-items:center;gap:10px;font-family:'JetBrains Mono',monospace;font-size:11px;background:var(--surface,#120f1a);border:1px solid var(--border,#2a2436);border-radius:3px;padding:8px 12px;">
       <span style="color:${color};">${badge}</span>
+      <span title="${f.kind === 'image' ? 'image' : 'video'}">${f.kind === 'image' ? '🖼' : '🎬'}</span>
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim,#b4a8c8);">${escHtml(f.file.name)}</span>
       <span style="color:${color};">${escHtml(f.statusText || f.status || '')}</span>
     </div>`;
@@ -17754,17 +17976,57 @@ function launderOnEnterTab() {
 
 // Module-level so the global Tauri drag-drop handler can add files too (on
 // desktop, Tauri intercepts OS file drops — HTML drop events never fire).
+// Classify a File as 'video' | 'image' | null. Extension is checked as well as
+// MIME because Tauri drops and Drive imports often arrive as octet-stream.
+function _ldFileKind(f) {
+  const n = (f && f.name) || '', t = (f && f.type) || '';
+  if (/^video\//i.test(t) || /\.(mp4|mov|m4v|webm|mkv)$/i.test(n)) return 'video';
+  if (/^image\//i.test(t) || /\.(jpe?g|png|webp|gif|bmp|hei[cf]|avif|tiff?)$/i.test(n)) return 'image';
+  return null;
+}
+
+// Per-mode dropzone copy + picker filter (v4.14.0).
+const LAUNDER_MODE_UI = {
+  video: { label: 'VIDEOS', accept: 'video/*,.mp4,.mov,.m4v,.webm,.mkv',
+           title: '+ DROP VIDEOS', hint: 'or click to choose · MP4 · MOV · M4V · WEBM · drop as many as you like · out: .MOV' },
+  image: { label: 'IMAGES', accept: 'image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.heic,.heif,.avif,.tif,.tiff',
+           title: '+ DROP IMAGES', hint: 'or click to choose · JPG · PNG · WEBP · HEIC · GIF · drop as many as you like · out: .HEIC' },
+};
+
+// Switch VIDEOS ↔ IMAGES: updates the segmented control, the hidden file
+// input's accept filter and the dropzone copy. Already-queued files keep
+// their own kind and still run — the toggle only gates what gets ADDED.
+function launderSetMode(mode) {
+  launderState.mode = mode === 'image' ? 'image' : 'video';
+  const ui = LAUNDER_MODE_UI[launderState.mode];
+  document.querySelectorAll('[data-ld-mode]').forEach(b => b.classList.toggle('active', b.dataset.ldMode === launderState.mode));
+  const input = document.getElementById('launderInput');
+  if (input) input.setAttribute('accept', ui.accept);
+  const title = document.getElementById('launderDropTitle');
+  if (title) title.textContent = ui.title;
+  const hint = document.getElementById('launderDropHint');
+  if (hint) hint.textContent = ui.hint;
+}
+
 function launderAddFiles(fileList) {
   if (!_launderSetupDone) { setupLaunderTab(); _launderSetupDone = true; }
-  const vids = Array.from(fileList || []).filter(f => /video\//.test(f.type) || /\.(mp4|mov|m4v|webm|mkv)$/i.test(f.name));
-  for (const file of vids) {
-    launderState.files.push({ id: 'ld' + Math.random().toString(36).slice(2, 9), file, status: 'queued', statusText: 'queued' });
+  const all = Array.from(fileList || []);
+  const want = launderState.mode === 'image' ? 'image' : 'video';
+  const accepted = all.filter(f => _ldFileKind(f) === want);
+  for (const file of accepted) {
+    launderState.files.push({ id: 'ld' + Math.random().toString(36).slice(2, 9), file, kind: want, status: 'queued', statusText: 'queued' });
   }
   const runBtn = document.getElementById('launderRunBtn');
   if (runBtn) runBtn.disabled = launderState.files.length === 0 || launderState.running;
   renderLaunderQueue();
-  if (vids.length) setLaunderStatus(`${launderState.files.length} file(s) queued.`);
-  return vids.length;
+  const skipped = all.length - accepted.length;
+  const other = want === 'image' ? 'VIDEOS' : 'IMAGES';
+  if (accepted.length) {
+    setLaunderStatus(`${launderState.files.length} file(s) queued.` + (skipped ? ` Skipped ${skipped} — switch MEDIA TYPE to ${other} to launder those.` : ''));
+  } else if (skipped) {
+    setLaunderStatus(`Skipped ${skipped} file(s): MEDIA TYPE is ${LAUNDER_MODE_UI[want].label}. Switch it to ${other} to launder them.`, 'error');
+  }
+  return accepted.length;
 }
 
 function setupLaunderTab() {
@@ -17809,6 +18071,11 @@ function setupLaunderTab() {
       document.querySelectorAll('[data-ld-preset]').forEach(b => b.classList.toggle('active', b === btn));
     });
   });
+  // v4.14.0: MEDIA TYPE segmented control (videos ↔ images).
+  document.querySelectorAll('[data-ld-mode]').forEach(btn => {
+    btn.addEventListener('click', () => launderSetMode(btn.dataset.ldMode));
+  });
+  launderSetMode(launderState.mode); // sync accept filter + dropzone copy on first wire-up
 
   runBtn.addEventListener('click', runLaunderBatch);
 }
@@ -17833,7 +18100,11 @@ async function runLaunderBatch() {
       const deviceId = launderState.deviceId === '__random__'
         ? LAUNDER_DEVICES[Math.floor(Math.random() * LAUNDER_DEVICES.length)].id
         : launderState.deviceId;
-      const res = await launderVideoFile(item.file, {
+      // v4.14.0: dispatch on the file's own kind, not the current toggle — a
+      // queue built across a mode switch still runs every file correctly.
+      const isImage = item.kind === 'image';
+      const pipeline = isImage ? launderImageFile : launderVideoFile;
+      const res = await pipeline(item.file, {
         deviceId,
         gpsMode: launderState.gpsMode,
         gpsCity: launderState.gpsCity,
@@ -17841,8 +18112,9 @@ async function runLaunderBatch() {
         onStatus: (m) => { item.statusText = m; renderLaunderQueue(); },
       });
       if (!res || !res.blob) throw new Error('pipeline failed');
-      const fname = (typeof generateIphoneFilename === 'function') ? generateIphoneFilename('MOV')
-        : ('IMG_' + Math.floor(1000 + Math.random() * 9000) + '.MOV');
+      const ext = isImage ? (res.ext || 'HEIC') : 'MOV';
+      const fname = (typeof generateIphoneFilename === 'function') ? generateIphoneFilename(ext)
+        : ('IMG_' + Math.floor(1000 + Math.random() * 9000) + '.' + ext);
       if (typeof deliverBlob === 'function') deliverBlob(res.blob, fname);
       else { const a = document.createElement('a'); a.href = URL.createObjectURL(res.blob); a.download = fname; a.click(); }
       item.status = 'done';
@@ -19012,6 +19284,27 @@ function ensureSettingsModal() {
 // const for easy maintenance — bump APP_VERSION + add an entry on each batch.
 // ============================================================================
 const PATCH_NOTES = [
+  {
+    version: '4.14.0',
+    date: '2026-10-10',
+    title: 'LAUNDER — IMAGES mode: toggle between videos and stills, same forensic pipeline, outputs iPhone .HEIC',
+    sections: [
+      { h: '🖼 New: MEDIA TYPE toggle', items: [
+        '🎬 / 🖼 A <b>VIDEOS | IMAGES</b> segmented control now sits first in the LAUNDER toolbar. Flip it and the dropzone, the file picker and desktop drop-routing switch to stills (JPG · PNG · WEBP · HEIC · GIF · BMP · AVIF · TIFF). Device identity, GPS mode (off · random · city) and the disruption preset apply to both kinds.',
+        '📦 Mixed queues just work — every queued file remembers whether it is a video or an image, and RUN sends each one through the right pipeline. Files of the other kind are skipped with a status hint instead of silently vanishing.',
+      ]},
+      { h: '🧼 The image pipeline', items: [
+        '🧽 <b>Strip</b>: the source is decoded and redrawn onto a Display-P3 canvas, so EXIF, XMP, IPTC, C2PA/JUMBF, ICC and every vendor blob are gone — nothing is &quot;cleaned&quot;, the bytes are simply never carried over. EXIF orientation is baked into the pixels first so nothing flips. HEIC sources decode natively on Mac and via the bundled converter on Windows.',
+        '🎛 <b>Disrupt</b>: GENTLE / BALANCED / AGGRESSIVE run the exact same ffmpeg filter graph as video (micro-crop, lens distortion, colour shift, chroma shift, blur/sharpen, vignette, grain) as a single-frame pass to break the perceptual hash. META ONLY skips it.',
+        '📱 <b>Identity</b>: iPhone EXIF (Make / Model / iOS version / lens / exposure / SubjectArea), Apple MakerNote, GPS from the chosen or random city with that city&#39;s timezone in <code>OffsetTime*</code> and the EXIF dates, Apple Display P3 ICC, then the exiftool Apple-only tags (HDRImageType, ContentIdentifier, RunTimeEpoch) — the same chain the Editor and Carousel use.',
+        '🗂 <b>Output</b>: a real <code>.HEIC</code> via sips (Mac) / heif-enc (Windows) with the post-convert MakerNote re-inject, named <code>IMG_XXXX.HEIC</code>. Falls back to a fully tagged <code>.JPG</code> if HEIC encoding fails.',
+      ]},
+      { h: '🔧 Under the hood', items: [
+        '🧭 <code>buildIphoneExif()</code> accepts optional <code>{ gps, tz }</code> overrides so LAUNDER can write its own coordinates / zone instead of the Editor&#39;s pin. GPS <code>DateStamp</code> / <code>TimeStamp</code> now use the capture instant (UTC) instead of the export time — fixes an hours-to-days drift against <code>DateTimeOriginal</code> on every iPhone image export, not just LAUNDER.',
+        '♻️ Device / GPS / timezone / date resolution was factored into <code>_ldResolveIdentity()</code>, shared by the video and image paths so both tell the same story.',
+      ]},
+    ],
+  },
   {
     version: '4.13.3',
     date: '2026-10-08',
