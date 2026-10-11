@@ -9101,7 +9101,7 @@ function updateFilenamePreview() {
 // ============================================================================
 // V3.3: VIEW TAB SWITCHING (Editor / Inspector)
 // ============================================================================
-const APP_VERSION = '4.15.0';
+const APP_VERSION = '4.16.0';
 let currentView = 'editor';
 
 // Single source of truth for the header meta line. Format:
@@ -16221,6 +16221,45 @@ const LAUNDER_CITIES = [
 ];
 const LAUNDER_DEFAULT_CITY = 'Miami';
 
+// v4.16.0: US "farm country" states. Same shape as LAUNDER_CITIES, but each
+// entry is centred on a RURAL agricultural region of the state (not its metro)
+// with a 50–150 km radius, so the pin lands on farmland / ranch land / small
+// towns. tzStd: Eastern -300 · Central -360 · Mountain -420 (all observe DST).
+// Listed under their own heading in the CITY dropdown. Deliberately NOT part
+// of the RANDOM pool, which stays "random world city" as before.
+const LAUNDER_FARM_STATES = [
+  { name: 'Iowa',           country: 'USA · farm country', lat: 42.03,  lon: -93.65,  radiusKm: 120, elevM: 300,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Nebraska',       country: 'USA · farm country', lat: 40.87,  lon: -97.80,  radiusKm: 130, elevM: 500,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Kansas',         country: 'USA · farm country', lat: 38.45,  lon: -97.60,  radiusKm: 130, elevM: 450,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Oklahoma',       country: 'USA · farm country', lat: 36.10,  lon: -97.90,  radiusKm: 110, elevM: 350,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Missouri',       country: 'USA · farm country', lat: 38.70,  lon: -93.20,  radiusKm: 110, elevM: 260,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Illinois',       country: 'USA · farm country', lat: 40.15,  lon: -89.35,  radiusKm: 110, elevM: 190,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Indiana',        country: 'USA · farm country', lat: 40.30,  lon: -86.60,  radiusKm: 100, elevM: 260,  tzStd: -300, dst: true, hemi: 'N' },
+  { name: 'Ohio',           country: 'USA · farm country', lat: 40.90,  lon: -83.50,  radiusKm: 100, elevM: 260,  tzStd: -300, dst: true, hemi: 'N' },
+  { name: 'Michigan',       country: 'USA · farm country', lat: 43.45,  lon: -84.70,  radiusKm: 100, elevM: 240,  tzStd: -300, dst: true, hemi: 'N' },
+  { name: 'Minnesota',      country: 'USA · farm country', lat: 44.00,  lon: -94.40,  radiusKm: 120, elevM: 320,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Wisconsin',      country: 'USA · farm country', lat: 44.67,  lon: -90.17,  radiusKm: 110, elevM: 390,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'North Dakota',   country: 'USA · farm country', lat: 46.90,  lon: -98.70,  radiusKm: 130, elevM: 440,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'South Dakota',   country: 'USA · farm country', lat: 44.05,  lon: -98.10,  radiusKm: 130, elevM: 400,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Montana',        country: 'USA · farm country', lat: 47.06,  lon: -109.43, radiusKm: 150, elevM: 1200, tzStd: -420, dst: true, hemi: 'N' },
+  { name: 'Wyoming',        country: 'USA · farm country', lat: 42.85,  lon: -108.40, radiusKm: 150, elevM: 1600, tzStd: -420, dst: true, hemi: 'N' },
+  { name: 'Idaho',          country: 'USA · farm country', lat: 42.70,  lon: -114.50, radiusKm: 100, elevM: 1150, tzStd: -420, dst: true, hemi: 'N' },
+  { name: 'Colorado',       country: 'USA · farm country', lat: 40.20,  lon: -103.50, radiusKm: 110, elevM: 1350, tzStd: -420, dst: true, hemi: 'N' },
+  { name: 'Texas',          country: 'USA · farm country', lat: 30.95,  lon: -99.20,  radiusKm: 150, elevM: 520,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Arkansas',       country: 'USA · farm country', lat: 34.50,  lon: -91.55,  radiusKm: 100, elevM: 65,   tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Louisiana',      country: 'USA · farm country', lat: 30.60,  lon: -92.20,  radiusKm: 90,  elevM: 20,   tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Mississippi',    country: 'USA · farm country', lat: 33.50,  lon: -90.60,  radiusKm: 100, elevM: 40,   tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Alabama',        country: 'USA · farm country', lat: 34.17,  lon: -86.85,  radiusKm: 100, elevM: 240,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Georgia',        country: 'USA · farm country', lat: 31.40,  lon: -83.60,  radiusKm: 100, elevM: 110,  tzStd: -300, dst: true, hemi: 'N' },
+  { name: 'Tennessee',      country: 'USA · farm country', lat: 35.48,  lon: -86.55,  radiusKm: 100, elevM: 240,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'Kentucky',       country: 'USA · farm country', lat: 37.00,  lon: -86.20,  radiusKm: 90,  elevM: 200,  tzStd: -360, dst: true, hemi: 'N' },
+  { name: 'North Carolina', country: 'USA · farm country', lat: 35.50,  lon: -78.00,  radiusKm: 90,  elevM: 40,   tzStd: -300, dst: true, hemi: 'N' },
+  { name: 'South Carolina', country: 'USA · farm country', lat: 33.55,  lon: -80.75,  radiusKm: 90,  elevM: 60,   tzStd: -300, dst: true, hemi: 'N' },
+  { name: 'West Virginia',  country: 'USA · farm country', lat: 37.85,  lon: -80.45,  radiusKm: 90,  elevM: 700,  tzStd: -300, dst: true, hemi: 'N' },
+  { name: 'Virginia',       country: 'USA · farm country', lat: 38.40,  lon: -78.90,  radiusKm: 80,  elevM: 400,  tzStd: -300, dst: true, hemi: 'N' },
+  { name: 'Pennsylvania',   country: 'USA · farm country', lat: 40.05,  lon: -76.30,  radiusKm: 50,  elevM: 110,  tzStd: -300, dst: true, hemi: 'N' },
+];
+
 function _ldIsDst(when, hemi) {
   const m = when.getUTCMonth();
   return hemi === 'N' ? (m >= 2 && m <= 9) : (m <= 2 || m >= 9);
@@ -16244,7 +16283,11 @@ function _ldRandomInCity(city, rng) {
   return { lat: _ldClampLat(city.lat + dLat), lon: _ldWrapLon(city.lon + dLon), altitudeM };
 }
 function _ldRandomCity(rng) { return LAUNDER_CITIES[Math.floor(rng() * LAUNDER_CITIES.length)] || LAUNDER_CITIES[0]; }
-function _ldFindCity(name) { const n = (name || '').trim().toLowerCase(); return LAUNDER_CITIES.find(c => c.name.toLowerCase() === n); }
+function _ldFindCity(name) {
+  const n = (name || '').trim().toLowerCase();
+  return LAUNDER_CITIES.find(c => c.name.toLowerCase() === n)
+      || LAUNDER_FARM_STATES.find(c => c.name.toLowerCase() === n); // v4.16.0
+}
 function _ldDefaultCity() { return _ldFindCity(LAUNDER_DEFAULT_CITY) || LAUNDER_CITIES[0]; }
 
 // --- Device profiles (device-profiles.ts), Apple only for video ---
@@ -18200,9 +18243,12 @@ function setupLaunderTab() {
   // Device dropdown (Apple identities). Random option first.
   deviceSel.innerHTML = `<option value="__random__">Random iPhone (per file)</option>` +
     LAUNDER_DEVICES.map(d => `<option value="${d.id}" ${d.id === launderState.deviceId ? 'selected' : ''}>${escHtml(d.label)}</option>`).join('');
-  // City dropdown.
-  citySel.innerHTML = LAUNDER_CITIES.map(c =>
-    `<option value="${escHtml(c.name)}" ${c.name === launderState.gpsCity ? 'selected' : ''}>${escHtml(c.name)}, ${escHtml(c.country)}</option>`).join('');
+  // City dropdown. v4.16.0: cities + a second headed group of US farm-country
+  // states (rural pins). Both resolve through _ldFindCity().
+  const cityOpt = (c) => `<option value="${escHtml(c.name)}" ${c.name === launderState.gpsCity ? 'selected' : ''}>${escHtml(c.name)}, ${escHtml(c.country)}</option>`;
+  citySel.innerHTML =
+    `<optgroup label="Cities">${LAUNDER_CITIES.map(cityOpt).join('')}</optgroup>` +
+    `<optgroup label="US farm country (rural pins)">${LAUNDER_FARM_STATES.map(cityOpt).join('')}</optgroup>`;
 
   const addFiles = (fileList) => launderAddFiles(fileList);
 
@@ -19544,6 +19590,22 @@ function ensureSettingsModal() {
 // const for easy maintenance — bump APP_VERSION + add an entry on each batch.
 // ============================================================================
 const PATCH_NOTES = [
+  {
+    version: '4.16.0',
+    date: '2026-10-11',
+    title: 'LAUNDER — 30 US farm-country states added to the GPS location list (rural pins, not metros)',
+    sections: [
+      { h: '🌾 New: US farm country', items: [
+        '🚜 The CITY dropdown now has a second group, <b>US farm country (rural pins)</b>, with 30 states: Iowa, Nebraska, Kansas, Oklahoma, Missouri, Illinois, Indiana, Ohio, Michigan, Minnesota, Wisconsin, North Dakota, South Dakota, Montana, Wyoming, Idaho, Colorado, Texas, Arkansas, Louisiana, Mississippi, Alabama, Georgia, Tennessee, Kentucky, North Carolina, South Carolina, West Virginia, Virginia and Pennsylvania.',
+        '📍 Each state is centred on a rural agricultural region — the corn belt around Ames, the Hill Country west of Austin, Lancaster County, the Delta, the Magic Valley — with a 50 to 150 km radius, so every laundered file gets a fresh coordinate on farmland, ranch land or a small town rather than inside a city.',
+        '🕐 Timezone and DST follow the state (Eastern / Central / Mountain), so capture times, <code>OffsetTime</code> and the GPS stamp all agree.',
+      ]},
+      { h: '🔧 Behaviour notes', items: [
+        '🎲 RANDOM is unchanged: it still draws from the world-city list only. Pick a state explicitly when you want a rural pin.',
+        '🖼 Applies to both VIDEOS and IMAGES mode, like every other location.',
+      ]},
+    ],
+  },
   {
     version: '4.15.0',
     date: '2026-10-11',
