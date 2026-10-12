@@ -8434,7 +8434,8 @@ async function handleExport() {
 
   // v3.16.14: open download modal for video exports (image exports are too
   // fast to benefit from a modal). Drive exports use their own modal.
-  const wantsModal = state.mediaType === 'video' && _editorExportIntent !== 'drive';
+  const wantsModal = state.mediaType === 'video' && _editorExportIntent !== 'drive'
+    && !(typeof _trialBatchRunning !== 'undefined' && _trialBatchRunning);
   const mode = state.exportMode || 'fast';
   if (wantsModal) {
     const titleByMode = {
@@ -9029,14 +9030,34 @@ function tbSetStatus(msg, kind) {
   el.style.color = kind === 'error' ? '#ff4d6d' : kind === 'success' ? 'var(--accent,#C300FF)' : 'var(--text-dim,#b4a8c8)';
 }
 
+// Show the grid view (previews) or the progress view (during download).
+function _tbShowProgress(on) {
+  const grid = document.getElementById('tbGrid');
+  const prog = document.getElementById('tbProgress');
+  const footer = document.getElementById('tbFooter');
+  if (grid) grid.classList.toggle('hidden', on);
+  if (prog) prog.classList.toggle('hidden', !on);
+  if (footer) footer.style.display = on ? 'none' : 'flex';
+}
+function _tbProgress(frac, label, sub) {
+  const bar = document.getElementById('tbProgBar');
+  const lbl = document.getElementById('tbProgLabel');
+  const subEl = document.getElementById('tbProgSub');
+  if (bar) bar.style.width = Math.round(Math.max(0, Math.min(1, frac)) * 100) + '%';
+  if (lbl && label != null) lbl.textContent = label;
+  if (subEl && sub != null) subEl.textContent = sub;
+}
+
 async function openTrialBatch(n) {
   if (!state.mediaElement) { showToast('Load media first'); return; }
+  wireTrialBatchModal();
   const modal = document.getElementById('trialBatchModal');
   const grid = document.getElementById('tbGrid');
   const countLbl = document.getElementById('tbCount');
   if (!modal || !grid) return;
   if (countLbl) countLbl.textContent = String(n);
   modal.classList.remove('hidden');
+  _tbShowProgress(false);
   grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text-faint);font-family:\'JetBrains Mono\',monospace;font-size:11px;padding:30px 0;">Rolling ' + n + ' variations…</div>';
   tbSetStatus('');
 
@@ -9069,55 +9090,110 @@ async function openTrialBatch(n) {
   tbSetStatus(n + ' variations ready — click one to apply, or DOWNLOAD ALL.');
 }
 
+// Run the editor export for the CURRENT state but capture the resulting Blob
+// instead of downloading it (so the batch can launder + rename before saving).
+// Temporarily intercepts deliverBlob; restores it in finally.
+async function _captureEditorExport() {
+  let cap = null, capName = null;
+  const real = window.deliverBlob;
+  window.deliverBlob = (b, n) => { cap = b; capName = n || null; };
+  try { await handleExport(); } finally { window.deliverBlob = real; }
+  return { blob: cap, name: capName };
+}
+
+let _trialBatchRunning = false;
+
 async function runTrialBatchExport() {
   const configs = trialBatchState.configs;
   if (!configs.length) return;
-  if (state.isExporting) { tbSetStatus('An export is already running.', 'error'); return; }
+  if (state.isExporting || _trialBatchRunning) { tbSetStatus('An export is already running.', 'error'); return; }
   if (!state.mediaElement) return;
-  const dlBtn = document.getElementById('tbDownload');
-  const reBtn = document.getElementById('tbReroll');
-  if (dlBtn) dlBtn.disabled = true;
-  if (reBtn) reBtn.disabled = true;
 
+  const launderEach = !!(document.getElementById('tbLaunder') || {}).checked;
+  const isVideo = state.mediaType === 'video';
   const original = captureTrialConfig();
+  _trialBatchRunning = true;
+  _tbShowProgress(true);
+  _tbProgress(0, 'Starting ' + configs.length + ' exports…', launderEach ? '🧼 Launder each: ON' : 'Launder each: off');
+
   let ok = 0, fail = 0;
   for (let i = 0; i < configs.length; i++) {
-    tbSetStatus('Exporting ' + (i + 1) + '/' + configs.length + '…');
+    const human = (i + 1) + '/' + configs.length;
+    _tbProgress(i / configs.length, 'Rendering variation ' + human + '…', '');
     applyTrialConfig(configs[i]);
     syncUIToState();
     if (typeof renderEditorFilterChips === 'function') renderEditorFilterChips();
-    // Let the state + a video frame settle before the export reads the canvas.
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-    try { await handleExport(); ok++; }
-    catch (e) { fail++; console.warn('[trial-batch] export', i + 1, 'failed:', e); }
+    try {
+      // 1) Render + export the variation to a Blob (iPhone meta / HEIC etc. per
+      //    the editor's own settings), without downloading yet.
+      let { blob, name } = await _captureEditorExport();
+      if (!blob) throw new Error('no blob produced');
+
+      // 2) Optionally send VIDEO through the full Launder pipeline (random city
+      //    + device, clean metadata, Apple container). Images are already
+      //    laundered by the editor's iPhone-HEIC export, so they pass through.
+      if (launderEach && isVideo && typeof launderVideoFile === 'function') {
+        _tbProgress((i + 0.5) / configs.length, 'Laundering variation ' + human + '…', '🧼 random city · random iPhone');
+        const res = await launderVideoFile(blob, { gpsMode: 'random', preset: 'metadata' });
+        if (res && res.blob) {
+          blob = res.blob;
+          name = (typeof generateIphoneFilename === 'function') ? generateIphoneFilename('MOV') : (name || ('IMG_' + (1000 + i) + '.MOV'));
+        }
+      }
+
+      // 3) Save it.
+      if (!name) name = 'trial_' + String(i + 1).padStart(2, '0') + (isVideo ? '.mov' : '.jpg');
+      if (typeof deliverBlob === 'function') deliverBlob(blob, name);
+      ok++;
+      _tbProgress((i + 1) / configs.length, 'Saved variation ' + human, name);
+    } catch (e) {
+      fail++;
+      console.warn('[trial-batch] export', i + 1, 'failed:', e);
+      _tbProgress((i + 1) / configs.length, 'Variation ' + human + ' failed', String(e && e.message || e));
+    }
   }
+
   // Restore the editor to its pre-batch look.
   applyTrialConfig(original);
   syncUIToState();
   if (typeof renderEditorFilterChips === 'function') renderEditorFilterChips();
   schedulePreviewRender();
 
-  if (dlBtn) dlBtn.disabled = false;
-  if (reBtn) reBtn.disabled = false;
-  tbSetStatus('✅ Downloaded ' + ok + (fail ? ' · ' + fail + ' failed' : '') + '.', fail ? 'error' : 'success');
+  _trialBatchRunning = false;
+  _tbProgress(1, '✅ Done — ' + ok + ' saved' + (fail ? ' · ' + fail + ' failed' : ''), '');
+  // Return to the grid after a beat so the user can roll again.
+  setTimeout(() => { _tbShowProgress(false); tbSetStatus('✅ Downloaded ' + ok + (fail ? ' · ' + fail + ' failed' : '') + '.', fail ? 'error' : 'success'); }, 1400);
 }
 
 function setupTrialBatch() {
+  // Only the toolbar BATCH button is wired here — it lives in the editor
+  // markup (parsed before this runs). The modal's own buttons live later in the
+  // document than this script, so they aren't in the DOM yet at init; they're
+  // wired lazily the first time the modal opens (wireTrialBatchModal).
   const batchBtn = document.getElementById('trialBatchBtn');
   const countSel = document.getElementById('trialBatchCount');
   if (batchBtn) batchBtn.addEventListener('click', () => {
     const n = parseInt((countSel && countSel.value) || '5', 10) || 5;
     openTrialBatch(n);
   });
+}
+
+let _tbModalWired = false;
+function wireTrialBatchModal() {
+  if (_tbModalWired) return;
   const close = document.getElementById('tbClose');
-  if (close) close.addEventListener('click', () => document.getElementById('trialBatchModal').classList.add('hidden'));
   const reroll = document.getElementById('tbReroll');
+  const dl = document.getElementById('tbDownload');
+  if (!close && !reroll && !dl) return; // modal not in DOM yet
+  if (close) close.addEventListener('click', () => document.getElementById('trialBatchModal').classList.add('hidden'));
   if (reroll) reroll.addEventListener('click', () => {
+    const countSel = document.getElementById('trialBatchCount');
     const n = trialBatchState.configs.length || parseInt((countSel && countSel.value) || '5', 10) || 5;
     openTrialBatch(n);
   });
-  const dl = document.getElementById('tbDownload');
   if (dl) dl.addEventListener('click', runTrialBatchExport);
+  _tbModalWired = true;
 }
 
 // ============================================================================
@@ -9276,7 +9352,7 @@ function updateFilenamePreview() {
 // ============================================================================
 // V3.3: VIEW TAB SWITCHING (Editor / Inspector)
 // ============================================================================
-const APP_VERSION = '4.18.0';
+const APP_VERSION = '4.18.1';
 let currentView = 'editor';
 
 // Single source of truth for the header meta line. Format:
@@ -19768,6 +19844,20 @@ function ensureSettingsModal() {
 // ============================================================================
 const PATCH_NOTES = [
   {
+    version: '4.18.1',
+    date: '2026-10-12',
+    title: 'TRIAL REEL BATCH — fix the dead DOWNLOAD ALL button + add Launder-each + a progress modal',
+    sections: [
+      { h: '🩹 Fixes', items: [
+        '🖱 <b>DOWNLOAD ALL did nothing.</b> The modal\'s buttons live later in the document than the init script, so they weren\'t in the DOM when the batch was wired — no click handler attached. Now the modal buttons wire lazily the first time the batch opens.',
+      ]},
+      { h: '🧼 Launder each + progress', items: [
+        '🧼 New <b>LAUNDER EACH</b> toggle (on by default): every exported variation is run through the Launder pipeline before it saves — videos get a random city + random iPhone identity, clean metadata and the Apple container; images use the editor\'s iPhone-HEIC export.',
+        '📊 DOWNLOAD ALL now shows a <b>progress modal</b> — a bar plus "Rendering / Laundering / Saving variation N/M" — instead of silently working in the background.',
+      ]},
+    ],
+  },
+  {
     version: '4.18.0',
     date: '2026-10-12',
     title: 'TRIAL REEL BATCH — generate N variations at once, preview them all, then download the whole set',
@@ -22631,8 +22721,18 @@ if (window.__TAURI__ && window.__TAURI__.core) {
 <button class="x" id="tbClose" aria-label="Close">×</button>
 </div>
 <div id="tbGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;padding:16px;max-height:62vh;overflow:auto;"></div>
-<div style="display:flex;gap:10px;align-items:center;padding:0 16px 10px;">
+<div id="tbProgress" class="hidden" style="padding:40px 24px;text-align:center;">
+<div id="tbProgLabel" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text,#e8e2f0);letter-spacing:.04em;margin-bottom:14px;">Preparing…</div>
+<div style="height:8px;background:var(--surface-2,#15121c);border:1px solid var(--border,#2a2436);border-radius:5px;overflow:hidden;max-width:420px;margin:0 auto;">
+<div id="tbProgBar" style="height:100%;width:0%;background:linear-gradient(90deg,#7B2CBF,#C300FF);transition:width .25s;"></div>
+</div>
+<div id="tbProgSub" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-faint,#8a7fa0);margin-top:12px;"></div>
+</div>
+<div id="tbFooter" style="display:flex;gap:10px;align-items:center;padding:0 16px 10px;flex-wrap:wrap;">
 <button class="seg-btn" id="tbReroll" title="Roll a fresh set of variations">⚄ REROLL ALL</button>
+<label id="tbLaunderLbl" title="Run every exported file through the Launder pipeline (clean metadata + iPhone identity) before download" style="display:inline-flex;align-items:center;gap:7px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim,#b4a8c8);cursor:pointer;margin-left:6px;">
+<input type="checkbox" id="tbLaunder" checked style="accent-color:#C300FF;width:15px;height:15px;cursor:pointer;"> 🧼 LAUNDER EACH
+</label>
 <button class="seg-btn" id="tbDownload" style="margin-left:auto;font-weight:700;letter-spacing:.1em;padding:9px 18px;">⬇ DOWNLOAD ALL</button>
 </div>
 <div id="tbStatus" style="padding:0 16px 16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim,#b4a8c8);min-height:14px;"></div>
