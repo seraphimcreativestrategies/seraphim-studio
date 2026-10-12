@@ -990,6 +990,12 @@
 </div>
 <div class="action-toolbar">
 <button class="action-btn trial-reel" id="trialReelBtn" title="Randomize all settings"><span class="action-icon">⚄</span><span>TRIAL REEL</span></button>
+<div class="trial-batch-ctl" style="display:inline-flex;align-items:stretch;gap:0;">
+<select id="trialBatchCount" title="Batch size" style="background:var(--surface-2,#15121c);color:var(--text,#e8e2f0);border:1px solid #ff3b6f;border-right:none;border-radius:4px 0 0 4px;padding:0 6px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer;">
+<option value="3">×3</option><option value="5" selected>×5</option><option value="10">×10</option><option value="20">×20</option>
+</select>
+<button class="action-btn trial-reel" id="trialBatchBtn" title="Generate a batch of trial-reel variations to preview + download all" style="border-radius:0 4px 4px 0;"><span class="action-icon">⚄⚄</span><span>BATCH</span></button>
+</div>
 <button class="action-btn" id="mirrorBtn" title="Mirror media horizontally"><span class="action-icon">↔</span><span>MIRROR</span></button>
 </div>
 <div class="drag-hint">DRAG CAPTION TO REPOSITION</div>
@@ -8886,79 +8892,232 @@ function randomColor() {
   return hslToHex(randInt(0, 359), randInt(60, 90), randInt(55, 75));
 }
 
-function trialReel() {
+// v4.18.0: Trial Reel refactored into a pure config roller + applier, so a
+// BATCH can generate N distinct variations, preview them as thumbnails, and
+// export all N. rollTrialConfig() returns a config object (no state mutation);
+// applyTrialConfig(cfg) writes it to state; trialReel() = roll → apply → sync.
+function rollTrialConfig() {
+  const cfg = {};
   // Random font, size, colors
-  state.fontIndex = randInt(0, FONT_OPTIONS.length - 1);
-  state.captionSize = randInt(32, 56);
-  state.textColor = Math.random() < 0.85 ? '#ffffff' : randomColor();
+  cfg.fontIndex = randInt(0, FONT_OPTIONS.length - 1);
+  cfg.captionSize = randInt(32, 56);
+  cfg.textColor = Math.random() < 0.85 ? '#ffffff' : randomColor();
 
   // Outline 50/50
   if (Math.random() < 0.5) {
-    state.outlineEnabled = true;
-    state.outlineWidth = randInt(2, 8);
-    state.outlineColor = Math.random() < 0.7 ? '#000000' : randomColor();
+    cfg.outlineEnabled = true;
+    cfg.outlineWidth = randInt(2, 8);
+    cfg.outlineColor = Math.random() < 0.7 ? '#000000' : randomColor();
   } else {
-    state.outlineEnabled = false;
-    state.outlineWidth = 0;
+    cfg.outlineEnabled = false;
+    cfg.outlineWidth = 0;
+    cfg.outlineColor = '#000000';
   }
 
-  state.bgOpacity = randInt(30, 80);
+  cfg.bgOpacity = randInt(30, 80);
 
-  // v4.2.22: Trial Reel can pick a non-bar caption style. Weighted toward
-  // 'bar' (Snapchat) since that's the primary aesthetic, with occasional
-  // 'box' (Reels) and 'plain' for variety. Keeps trial reels surprising
-  // without making them all look like Reels overnight.
+  // v4.2.22: non-bar caption style, weighted toward 'bar' (Snapchat).
   const styleRoll = Math.random();
-  state.captionStyle = styleRoll < 0.65 ? 'bar' : (styleRoll < 0.88 ? 'box' : 'plain');
-  if (state.captionStyle === 'plain' && !state.outlineEnabled) {
-    state.outlineEnabled = true;
-    state.outlineWidth = state.outlineWidth > 0 ? state.outlineWidth : 2;
+  cfg.captionStyle = styleRoll < 0.65 ? 'bar' : (styleRoll < 0.88 ? 'box' : 'plain');
+  if (cfg.captionStyle === 'plain' && !cfg.outlineEnabled) {
+    cfg.outlineEnabled = true;
+    cfg.outlineWidth = cfg.outlineWidth > 0 ? cfg.outlineWidth : 2;
   }
 
   // Filter ranges (tasteful, not extreme)
-  state.saturation = randInt(85, 130);
-  state.contrast = randInt(92, 115);
-  state.brightness = randInt(92, 110);
-  state.warmth = randInt(-25, 25);
-  state.grain = randInt(0, 40);
-  state.vignette = randInt(0, 35);
-  state.mirror = Math.random() < 0.5;
+  cfg.saturation = randInt(85, 130);
+  cfg.contrast = randInt(92, 115);
+  cfg.brightness = randInt(92, 110);
+  cfg.warmth = randInt(-25, 25);
+  cfg.grain = randInt(0, 40);
+  cfg.vignette = randInt(0, 35);
+  cfg.mirror = Math.random() < 0.5;
 
-  // Random caption Y position too — keep it around middle/lower
-  state.captionY = rand(0.45, 0.85);
+  // Random caption Y position too — middle/lower.
+  cfg.captionY = rand(0.45, 0.85);
 
-  // v4.2.23: 55% chance to add a random Instagram-style filter at modest
-  // strength. iPhone LUT filters are skipped here — they're heavier-handed and
-  // would clash with the random adjustment values above. Always single filter
-  // (don't stack — multi-filter trial reels look like accidents). Existing
-  // filters are cleared first so trial reel is reproducible.
-  state.filters = [];
-  state.filterStrengths = {};
+  // v4.2.23: 55% chance of a single modest Instagram CSS filter (no stacking).
+  cfg.filters = [];
+  cfg.filterStrengths = {};
   if (typeof FILTER_LIBRARY !== 'undefined' && Math.random() < 0.55) {
     const cssFilters = FILTER_LIBRARY.filter(f => f.method === 'css');
     if (cssFilters.length > 0) {
       const pick = cssFilters[randInt(0, cssFilters.length - 1)];
-      state.filters.push(pick.id);
-      state.filterStrengths[pick.id] = randInt(35, 70);
+      cfg.filters.push(pick.id);
+      cfg.filterStrengths[pick.id] = randInt(35, 70);
     }
   }
 
-  // v4.17.0: gentle zoom-in. ~65% of rolls get a subtle 2–6% center zoom (a
-  // framing shift that changes every pixel + the perceptual hash); the rest
-  // stay at 1.0. Never aggressive — applied in renderFrame for preview + export.
-  state.trialZoom = Math.random() < 0.65
-    ? +(1.02 + Math.random() * 0.04).toFixed(3)
-    : 1;
+  // v4.17.0: gentle zoom-in — ~65% get a subtle 2–6% center zoom.
+  cfg.trialZoom = Math.random() < 0.65 ? +(1.02 + Math.random() * 0.04).toFixed(3) : 1;
+  return cfg;
+}
 
+// The exact set of state fields a trial-reel variation controls (for apply +
+// snapshot/restore).
+const _TRIAL_FIELDS = ['fontIndex', 'captionSize', 'textColor', 'outlineEnabled',
+  'outlineWidth', 'outlineColor', 'bgOpacity', 'captionStyle', 'saturation',
+  'contrast', 'brightness', 'warmth', 'grain', 'vignette', 'mirror', 'captionY',
+  'filters', 'filterStrengths', 'trialZoom'];
+
+function captureTrialConfig() {
+  const cfg = {};
+  for (const k of _TRIAL_FIELDS) {
+    cfg[k] = (k === 'filters') ? (state.filters || []).slice()
+           : (k === 'filterStrengths') ? Object.assign({}, state.filterStrengths || {})
+           : state[k];
+  }
+  return cfg;
+}
+
+function applyTrialConfig(cfg) {
+  for (const k of _TRIAL_FIELDS) {
+    if (cfg[k] === undefined) continue;
+    state[k] = (k === 'filters') ? cfg[k].slice()
+             : (k === 'filterStrengths') ? Object.assign({}, cfg[k])
+             : cfg[k];
+  }
+}
+
+function trialReel() {
+  applyTrialConfig(rollTrialConfig());
   syncUIToState();
   if (typeof renderEditorFilterChips === 'function') renderEditorFilterChips();
   schedulePreviewRender();
 
   // Spin the dice icon
   const btn = document.getElementById('trialReelBtn');
-  btn.classList.remove('spinning');
-  void btn.offsetWidth; // restart animation
-  btn.classList.add('spinning');
+  if (btn) { btn.classList.remove('spinning'); void btn.offsetWidth; btn.classList.add('spinning'); }
+}
+
+// Bake a thumbnail (JPEG data URL) of the current media with `cfg` applied
+// temporarily — reuses renderFrame exactly as the export does, so the preview
+// matches what will be downloaded. Restores the live config afterward.
+async function renderTrialThumb(cfg, maxDim) {
+  const snap = captureTrialConfig();
+  applyTrialConfig(cfg);
+  try {
+    const dims = (typeof getExportDimensions === 'function') ? getExportDimensions() : null;
+    const W = (dims && dims.w) || state.mediaWidth || 720;
+    const H = (dims && dims.h) || state.mediaHeight || 1280;
+    const scale = Math.min(1, maxDim / Math.max(W, H));
+    const tw = Math.max(1, Math.round(W * scale));
+    const th = Math.max(1, Math.round(H * scale));
+    const c = document.createElement('canvas');
+    c.width = tw; c.height = th;
+    const cx = c.getContext('2d');
+    await renderFrame(state.mediaElement, cx, tw, th);
+    return c.toDataURL('image/jpeg', 0.72);
+  } catch (e) {
+    console.warn('[trial-batch] thumb render failed:', e);
+    return null;
+  } finally {
+    applyTrialConfig(snap);
+  }
+}
+
+// ============================================================================
+// v4.18.0: TRIAL REEL BATCH — generate N distinct variations, preview them,
+// apply any one, or download all N (each a full export with its own config).
+// ============================================================================
+const trialBatchState = { configs: [] };
+
+function tbSetStatus(msg, kind) {
+  const el = document.getElementById('tbStatus');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = kind === 'error' ? '#ff4d6d' : kind === 'success' ? 'var(--accent,#C300FF)' : 'var(--text-dim,#b4a8c8)';
+}
+
+async function openTrialBatch(n) {
+  if (!state.mediaElement) { showToast('Load media first'); return; }
+  const modal = document.getElementById('trialBatchModal');
+  const grid = document.getElementById('tbGrid');
+  const countLbl = document.getElementById('tbCount');
+  if (!modal || !grid) return;
+  if (countLbl) countLbl.textContent = String(n);
+  modal.classList.remove('hidden');
+  grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text-faint);font-family:\'JetBrains Mono\',monospace;font-size:11px;padding:30px 0;">Rolling ' + n + ' variations…</div>';
+  tbSetStatus('');
+
+  // Fresh set of distinct variations.
+  trialBatchState.configs = Array.from({ length: n }, () => rollTrialConfig());
+
+  // Render thumbnails sequentially (each temporarily applies its config).
+  grid.innerHTML = '';
+  for (let i = 0; i < trialBatchState.configs.length; i++) {
+    const cfg = trialBatchState.configs[i];
+    const url = await renderTrialThumb(cfg, 260);
+    const cell = document.createElement('div');
+    cell.style.cssText = 'position:relative;border:1px solid var(--border,#2a2436);border-radius:4px;overflow:hidden;cursor:pointer;background:#0b0810;';
+    cell.title = 'Click to apply this variation to the editor';
+    const z = cfg.trialZoom > 1 ? ' · zoom ' + Math.round((cfg.trialZoom - 1) * 100) + '%' : '';
+    const fl = cfg.filters && cfg.filters.length ? ' · ' + cfg.filters[0] : '';
+    cell.innerHTML =
+      (url ? '<img src="' + url + '" style="width:100%;display:block;aspect-ratio:' + (state.mediaWidth || 1) + '/' + (state.mediaHeight || 1) + ';object-fit:cover;">' : '<div style="padding:30px;color:#ff4d6d;font-size:10px;">render failed</div>') +
+      '<div style="position:absolute;left:0;right:0;bottom:0;background:linear-gradient(transparent,rgba(0,0,0,.8));color:#fff;font-family:\'JetBrains Mono\',monospace;font-size:9px;letter-spacing:.04em;padding:10px 6px 5px;">#' + (i + 1) + z + fl + '</div>';
+    cell.addEventListener('click', () => {
+      applyTrialConfig(cfg);
+      syncUIToState();
+      if (typeof renderEditorFilterChips === 'function') renderEditorFilterChips();
+      schedulePreviewRender();
+      document.getElementById('trialBatchModal').classList.add('hidden');
+      showToast('Variation #' + (i + 1) + ' applied');
+    });
+    grid.appendChild(cell);
+  }
+  tbSetStatus(n + ' variations ready — click one to apply, or DOWNLOAD ALL.');
+}
+
+async function runTrialBatchExport() {
+  const configs = trialBatchState.configs;
+  if (!configs.length) return;
+  if (state.isExporting) { tbSetStatus('An export is already running.', 'error'); return; }
+  if (!state.mediaElement) return;
+  const dlBtn = document.getElementById('tbDownload');
+  const reBtn = document.getElementById('tbReroll');
+  if (dlBtn) dlBtn.disabled = true;
+  if (reBtn) reBtn.disabled = true;
+
+  const original = captureTrialConfig();
+  let ok = 0, fail = 0;
+  for (let i = 0; i < configs.length; i++) {
+    tbSetStatus('Exporting ' + (i + 1) + '/' + configs.length + '…');
+    applyTrialConfig(configs[i]);
+    syncUIToState();
+    if (typeof renderEditorFilterChips === 'function') renderEditorFilterChips();
+    // Let the state + a video frame settle before the export reads the canvas.
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    try { await handleExport(); ok++; }
+    catch (e) { fail++; console.warn('[trial-batch] export', i + 1, 'failed:', e); }
+  }
+  // Restore the editor to its pre-batch look.
+  applyTrialConfig(original);
+  syncUIToState();
+  if (typeof renderEditorFilterChips === 'function') renderEditorFilterChips();
+  schedulePreviewRender();
+
+  if (dlBtn) dlBtn.disabled = false;
+  if (reBtn) reBtn.disabled = false;
+  tbSetStatus('✅ Downloaded ' + ok + (fail ? ' · ' + fail + ' failed' : '') + '.', fail ? 'error' : 'success');
+}
+
+function setupTrialBatch() {
+  const batchBtn = document.getElementById('trialBatchBtn');
+  const countSel = document.getElementById('trialBatchCount');
+  if (batchBtn) batchBtn.addEventListener('click', () => {
+    const n = parseInt((countSel && countSel.value) || '5', 10) || 5;
+    openTrialBatch(n);
+  });
+  const close = document.getElementById('tbClose');
+  if (close) close.addEventListener('click', () => document.getElementById('trialBatchModal').classList.add('hidden'));
+  const reroll = document.getElementById('tbReroll');
+  if (reroll) reroll.addEventListener('click', () => {
+    const n = trialBatchState.configs.length || parseInt((countSel && countSel.value) || '5', 10) || 5;
+    openTrialBatch(n);
+  });
+  const dl = document.getElementById('tbDownload');
+  if (dl) dl.addEventListener('click', runTrialBatchExport);
 }
 
 // ============================================================================
@@ -9117,7 +9276,7 @@ function updateFilenamePreview() {
 // ============================================================================
 // V3.3: VIEW TAB SWITCHING (Editor / Inspector)
 // ============================================================================
-const APP_VERSION = '4.17.0';
+const APP_VERSION = '4.18.0';
 let currentView = 'editor';
 
 // Single source of truth for the header meta line. Format:
@@ -18908,6 +19067,8 @@ function bindEvents() {
 
   // V3: Trial Reel
   document.getElementById('trialReelBtn').addEventListener('click', trialReel);
+  // v4.18.0: Trial Reel batch (preview + download N variations)
+  if (typeof setupTrialBatch === 'function') setupTrialBatch();
 
   // V3: Mirror toggle
   document.getElementById('mirrorBtn').addEventListener('click', () => {
@@ -19606,6 +19767,21 @@ function ensureSettingsModal() {
 // const for easy maintenance — bump APP_VERSION + add an entry on each batch.
 // ============================================================================
 const PATCH_NOTES = [
+  {
+    version: '4.18.0',
+    date: '2026-10-12',
+    title: 'TRIAL REEL BATCH — generate N variations at once, preview them all, then download the whole set',
+    sections: [
+      { h: '⚄⚄ Batch', items: [
+        '🔢 Next to the TRIAL REEL dice there\'s now a <b>batch size selector (×3 / ×5 / ×10 / ×20)</b> and a <b>BATCH</b> button. Pick a size and it rolls that many <b>distinct</b> trial-reel variations — each with its own filter, adjustments, caption styling, mirror and gentle zoom.',
+        '🖼 <b>Preview the whole batch</b> the moment you open it: a grid of thumbnails rendered through the exact export pipeline, so each tile is what you\'ll actually get. Click any tile to apply that variation to the editor; hit <b>REROLL ALL</b> for a fresh set.',
+        '⬇ <b>DOWNLOAD ALL</b> exports every variation in one go (each a full export with iPhone meta / HEIC / your current output settings), then restores the editor to how you left it.',
+      ]},
+      { h: '🔧 Under the hood', items: [
+        'The Trial Reel randomizer was split into a pure config roller + applier, so a batch is just N rolls shared with the single-dice button — same look, now reusable. Works for images and video (video tiles preview the current frame).',
+      ]},
+    ],
+  },
   {
     version: '4.17.0',
     date: '2026-10-12',
@@ -22448,6 +22624,20 @@ if (window.__TAURI__ && window.__TAURI__.core) {
   .drivex-ctx-sep{height:1px;background:var(--border);margin:5px 0}
   .drivex-ctx-sub{padding:6px 14px 4px;font-family:'Orbitron','Inter',sans-serif;font-weight:600;font-size:9px;letter-spacing:.16em;color:var(--text-faint)}
 </style>
+<div class="picker-overlay hidden" id="trialBatchModal">
+<div class="picker-modal" style="max-width:min(920px,calc(100vw - 32px));width:min(920px,calc(100vw - 32px));">
+<div class="picker-head">
+<span class="ttl">⚄⚄ TRIAL REEL BATCH — <span id="tbCount">5</span> VARIATIONS</span>
+<button class="x" id="tbClose" aria-label="Close">×</button>
+</div>
+<div id="tbGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;padding:16px;max-height:62vh;overflow:auto;"></div>
+<div style="display:flex;gap:10px;align-items:center;padding:0 16px 10px;">
+<button class="seg-btn" id="tbReroll" title="Roll a fresh set of variations">⚄ REROLL ALL</button>
+<button class="seg-btn" id="tbDownload" style="margin-left:auto;font-weight:700;letter-spacing:.1em;padding:9px 18px;">⬇ DOWNLOAD ALL</button>
+</div>
+<div id="tbStatus" style="padding:0 16px 16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim,#b4a8c8);min-height:14px;"></div>
+</div>
+</div>
 <div class="picker-overlay hidden" id="drivePickerOverlay">
 <div class="picker-modal" id="drivePickerModal">
 <div class="picker-head">
