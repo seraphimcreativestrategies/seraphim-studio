@@ -3825,6 +3825,15 @@ async function renderFrame(sourceElem, targetCtx, w, h) {
     targetCtx.translate(w, 0);
     targetCtx.scale(-1, 1);
   }
+  // v4.17.0: gentle center zoom-in (framing shift for Trial Reel fingerprint
+  // variation). Applied in the shared render so it covers the preview AND every
+  // export engine. A value of 1 (default/undefined) is a no-op.
+  const _tz = (state.trialZoom && state.trialZoom > 1) ? state.trialZoom : 1;
+  if (_tz !== 1) {
+    targetCtx.translate(w / 2, h / 2);
+    targetCtx.scale(_tz, _tz);
+    targetCtx.translate(-w / 2, -h / 2);
+  }
   if (!isPreview) {
     targetCtx.filter = buildFilterString();
   }
@@ -8934,6 +8943,13 @@ function trialReel() {
     }
   }
 
+  // v4.17.0: gentle zoom-in. ~65% of rolls get a subtle 2–6% center zoom (a
+  // framing shift that changes every pixel + the perceptual hash); the rest
+  // stay at 1.0. Never aggressive — applied in renderFrame for preview + export.
+  state.trialZoom = Math.random() < 0.65
+    ? +(1.02 + Math.random() * 0.04).toFixed(3)
+    : 1;
+
   syncUIToState();
   if (typeof renderEditorFilterChips === 'function') renderEditorFilterChips();
   schedulePreviewRender();
@@ -9101,7 +9117,7 @@ function updateFilenamePreview() {
 // ============================================================================
 // V3.3: VIEW TAB SWITCHING (Editor / Inspector)
 // ============================================================================
-const APP_VERSION = '4.16.0';
+const APP_VERSION = '4.17.0';
 let currentView = 'editor';
 
 // Single source of truth for the header meta line. Format:
@@ -19590,6 +19606,21 @@ function ensureSettingsModal() {
 // const for easy maintenance — bump APP_VERSION + add an entry on each batch.
 // ============================================================================
 const PATCH_NOTES = [
+  {
+    version: '4.17.0',
+    date: '2026-10-12',
+    title: 'TRIAL REEL — now also adds a gentle zoom-in (framing shift) on top of the caption/filter randomization',
+    sections: [
+      { h: '⚄ Trial Reel', items: [
+        '🔎 The TRIAL REEL dice now also apply a <b>subtle center zoom-in</b> — ~65% of rolls get a 2–6% zoom, the rest stay at 1.0. It\'s a framing shift that changes every pixel (and the perceptual hash) without looking aggressive, so each trial variant reads as a distinct capture.',
+        '🎨 Filters / adjustments are rolled as before (saturation, contrast, warmth, grain, vignette, mirror + a ~55% chance of a modest Instagram filter) — the zoom stacks on top.',
+        '⚙️ The zoom is applied in the shared render path, so it shows live in the preview AND carries through every export engine (Fast / FFmpeg / Native / Cloud) and images alike.',
+      ]},
+      { h: '🔜 Coming next', items: [
+        '✂️ <b>Cut &amp; trim</b> (gentle start/end trimming for video) are the next addition — they touch each export engine\'s frame range, so they\'re being done as a separate, carefully-tested pass rather than rushed in alongside the zoom.',
+      ]},
+    ],
+  },
   {
     version: '4.16.0',
     date: '2026-10-11',
