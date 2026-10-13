@@ -7585,6 +7585,19 @@ async function exportVideoFast() {
   const { track, samples, timescale, avccDescription, trackDuration } = demuxResult;
   const sourceDuration = trackDuration / timescale; // seconds
 
+  // v4.19.1: gentle Trial-Reel trim, baked into THIS single encode. The launder
+  // stream-copy can't shave < a keyframe interval (a sub-2s -ss just snaps back
+  // to frame 0), so trimming here — where we re-encode every frame anyway — is
+  // the only frame-exact home, and it's free (fewer frames = slightly faster).
+  // Zero trim leaves every derived value identical to before.
+  const _trimS = Math.max(0, Number(state.trimStart) || 0);
+  const _trimE = Math.max(0, Number(state.trimEnd) || 0);
+  const _hasTrim = (_trimS > 0 || _trimE > 0) && sourceDuration > 0.5;
+  const _trimStartUs = _hasTrim ? Math.round(_trimS * 1_000_000) : 0;
+  const _effDuration = _hasTrim
+    ? Math.max(0.3, sourceDuration - _trimS - _trimE)
+    : sourceDuration;
+
   // === STEP 3: Decode audio (skipped if MUTE AUDIO is on) ===
   setExportStep('demux', 'done');
   let audioBuffer = null;
@@ -7696,7 +7709,7 @@ async function exportVideoFast() {
   // For each output slot at i/targetFps, use the most recent decoded source frame
   // whose timestamp is <= slot time. (Hold-last sampling.)
   const frameDurationUs = Math.round(1_000_000 / targetFps);
-  const totalOutputFrames = Math.ceil(sourceDuration * targetFps);
+  const totalOutputFrames = Math.ceil(_effDuration * targetFps);
   let nextOutputIndex = 0;
   let pendingSourceFrames = []; // queue of decoded frames awaiting consumption
   let decoderDone = false;
@@ -7836,8 +7849,12 @@ async function exportVideoFast() {
       // Emit all output slots whose timestamp is <= this source frame's time,
       // using the *previous* most-recent frame.
       while (nextOutputIndex < totalOutputFrames) {
+        // Sample the SOURCE at (output slot + trim offset); the emitted frame's
+        // timestamp stays output-relative so the result starts at 0. With no
+        // trim _trimStartUs is 0 and these are identical to before.
         const outTsUs = nextOutputIndex * frameDurationUs;
-        if (outTsUs > srcTsUs) break;
+        const srcSampleUs = outTsUs + _trimStartUs;
+        if (srcSampleUs > srcTsUs) break;
 
         const frameToUse = mostRecentFrame || sourceFrame;
         const isKey = nextOutputIndex % Math.max(1, targetFps * 2) === 0;
@@ -8052,7 +8069,7 @@ async function exportVideoFast() {
   // Emit any remaining output slots using the last frame we have
   while (nextOutputIndex < totalOutputFrames && mostRecentFrame) {
     const outTsUs = nextOutputIndex * frameDurationUs;
-    if (outTsUs > sourceDuration * 1_000_000) break;
+    if (outTsUs > _effDuration * 1_000_000) break;
     const isKey = nextOutputIndex % Math.max(1, targetFps * 2) === 0;
     await emitOutput(mostRecentFrame, outTsUs, isKey);
     nextOutputIndex++;
@@ -8087,10 +8104,18 @@ async function exportVideoFast() {
       for (let ch = 0; ch < audioChannels; ch++) {
         channelData.push(audioBuffer.getChannelData(ch));
       }
+      // v4.19.1: trim audio to EXACTLY the video's effective window (output ts
+      // starts at 0). Keyed off the same _hasTrim guard + _effDuration the video
+      // uses, so audio never desyncs — even on a sub-0.5s clip (guard off → full
+      // audio) or when the trims exceed the duration (clamped to _effDuration).
+      const aStart = _hasTrim ? Math.min(totalSamples, Math.round(_trimS * audioSampleRate)) : 0;
+      const aEnd = _hasTrim
+        ? Math.min(totalSamples, aStart + Math.round(_effDuration * audioSampleRate))
+        : totalSamples;
       const FRAME_SIZE = 1024;
-      let cursor = 0;
-      while (cursor < totalSamples) {
-        const samplesThisFrame = Math.min(FRAME_SIZE, totalSamples - cursor);
+      let cursor = aStart;
+      while (cursor < aEnd) {
+        const samplesThisFrame = Math.min(FRAME_SIZE, aEnd - cursor);
         const planar = new Float32Array(samplesThisFrame * audioChannels);
         for (let ch = 0; ch < audioChannels; ch++) {
           planar.set(channelData[ch].subarray(cursor, cursor + samplesThisFrame), ch * samplesThisFrame);
@@ -8100,7 +8125,7 @@ async function exportVideoFast() {
           sampleRate: audioSampleRate,
           numberOfFrames: samplesThisFrame,
           numberOfChannels: audioChannels,
-          timestamp: Math.round((cursor / audioSampleRate) * 1_000_000),
+          timestamp: Math.round(((cursor - aStart) / audioSampleRate) * 1_000_000),
           data: planar,
         });
         audioEncoder.encode(audioData);
@@ -9134,6 +9159,12 @@ async function runTrialBatchExport() {
   const cityLabel = citySelV === '__random__' ? 'random city' : citySelV;
   const devLabel = devSelV === '__random__' ? 'random iPhone' : (_ldFindDevice(devSelV) ? _ldFindDevice(devSelV).label : devSelV);
   const original = captureTrialConfig();
+  // v4.19.1: force the Fast (WebCodecs, hardware-accelerated) engine for the
+  // whole batch. It's the quickest per-variation encode AND the only engine
+  // that bakes the gentle trim — a batch of N is N full re-encodes, so the slow
+  // software/cloud engines would make it crawl. Restored in the finally below.
+  const savedExportMode = state.exportMode;
+  if (isVideo) state.exportMode = 'fast';
   _trialBatchRunning = true;
   _tbShowProgress(true);
   _tbProgress(0, 'Starting ' + configs.length + ' exports…',
@@ -9170,7 +9201,9 @@ async function runTrialBatchExport() {
           gpsMode: citySelV === '__random__' ? 'random' : 'city',
           gpsCity: citySelV === '__random__' ? undefined : citySelV,
           preset: 'metadata',
-          trimStart: cfg.trimStart, trimEnd: cfg.trimEnd,
+          // NOTE: no trim here — the WebCodecs capture above already baked the
+          // gentle trim frame-exactly. Trimming again on the launder stream-copy
+          // would double-cut (and snap to a keyframe). See exportVideoFast v4.19.1.
         });
         if (res && res.blob) {
           blob = res.blob;
@@ -9195,7 +9228,8 @@ async function runTrialBatchExport() {
     }
   }
 
-  // Restore the editor to its pre-batch look.
+  // Restore the editor to its pre-batch look + the user's export engine.
+  state.exportMode = savedExportMode;
   applyTrialConfig(original);
   syncUIToState();
   if (typeof renderEditorFilterChips === 'function') renderEditorFilterChips();
@@ -9245,8 +9279,13 @@ function wireTrialBatchModal() {
   // Populate CITY + IPHONE selectors from the launder tables.
   const citySel = document.getElementById('tbCity');
   if (citySel && typeof LAUNDER_CITIES !== 'undefined') {
-    citySel.innerHTML = '<option value="__random__">Random city</option>' +
-      LAUNDER_CITIES.map(c => '<option value="' + escHtml(c.name) + '">' + escHtml(c.name) + ', ' + escHtml(c.country) + '</option>').join('');
+    const cityOpt = c => '<option value="' + escHtml(c.name) + '">' + escHtml(c.name) + ', ' + escHtml(c.country) + '</option>';
+    let html = '<option value="__random__">Random city</option>' +
+      '<optgroup label="Cities">' + LAUNDER_CITIES.map(cityOpt).join('') + '</optgroup>';
+    if (typeof LAUNDER_FARM_STATES !== 'undefined') {
+      html += '<optgroup label="USA · farm country">' + LAUNDER_FARM_STATES.map(cityOpt).join('') + '</optgroup>';
+    }
+    citySel.innerHTML = html;
   }
   const devSel = document.getElementById('tbDevice');
   if (devSel && typeof LAUNDER_DEVICES !== 'undefined') {
@@ -9426,7 +9465,7 @@ function updateFilenamePreview() {
 // ============================================================================
 // V3.3: VIEW TAB SWITCHING (Editor / Inspector)
 // ============================================================================
-const APP_VERSION = '4.19.0';
+const APP_VERSION = '4.19.1';
 let currentView = 'editor';
 
 // Single source of truth for the header meta line. Format:
@@ -17271,10 +17310,12 @@ async function launderVideoBlob(blob, opts = {}) {
     gpsCoord: coord,
     preset: 'metadata',
     captureDate,
-    // v4.19.0: carry the Trial-Reel trim through the caption-export launder so a
-    // single trial-reel video DOWNLOAD trims too (explicit opts win over state).
-    trimStart: opts.trimStart != null ? opts.trimStart : (state && state.trimStart) || 0,
-    trimEnd: opts.trimEnd != null ? opts.trimEnd : (state && state.trimEnd) || 0,
+    // v4.19.1: do NOT trim here. This launder runs AFTER the export engine; the
+    // Fast (WebCodecs) path already baked the Trial-Reel trim frame-exactly, so
+    // re-trimming on the stream-copy would double-cut. Only an explicit caller
+    // opt (none today) trims — the state-based trim is owned by exportVideoFast.
+    trimStart: opts.trimStart != null ? opts.trimStart : 0,
+    trimEnd: opts.trimEnd != null ? opts.trimEnd : 0,
     onStatus: opts.onStatus,
   });
   return res ? res.blob : null;
@@ -19941,6 +19982,22 @@ function ensureSettingsModal() {
 // const for easy maintenance — bump APP_VERSION + add an entry on each batch.
 // ============================================================================
 const PATCH_NOTES = [
+  {
+    version: '4.19.1',
+    date: '2026-10-13',
+    title: 'Batch fixes — trim actually trims, full city list, faster engine',
+    sections: [
+      { h: '✂️ Trim now works', items: [
+        '✂️ <b>Trimming had no effect.</b> It ran on the launder stream-copy, where a sub-2-second cut just snaps back to the nearest keyframe (frame 0) — so nothing got shaved. Trim now happens inside the Fast (WebCodecs) encode that already runs per variation, which is <b>frame-exact</b> and free (fewer frames = slightly faster). Audio is cut to the exact same window, so it never desyncs.',
+      ]},
+      { h: '🏙 Full city list', items: [
+        '🏙 The batch <b>CITY</b> picker was missing the <b>USA · farm country</b> states (the rural-pin list from v4.16.0). It now shows the complete launder list — world cities + all 30 farm states — in the same two groups as the Launder tab.',
+      ]},
+      { h: '⚡ Faster batch', items: [
+        '⚡ A video batch now forces the <b>Fast (WebCodecs, hardware-accelerated)</b> engine for every variation, instead of whatever slow software/cloud engine the editor happened to be set to. A batch of N is N full re-encodes, so the engine choice is the difference between quick and crawling. Your editor export-mode setting is restored when the batch finishes.',
+      ]},
+    ],
+  },
   {
     version: '4.19.0',
     date: '2026-10-12',
