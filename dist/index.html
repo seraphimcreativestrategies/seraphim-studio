@@ -5688,6 +5688,49 @@ async function enrichHeicMakerNote(heicPath) {
   }
 }
 
+// v4.20.0: GPS for images. Until now image GPS was written ONLY via piexif into
+// the JPEG — but `jpeg_to_heic` (sips) STRIPS all EXIF on convert (same reason
+// enrichHeicMakerNote has to re-add the MakerNote), and nothing re-added the GPS
+// IFD. Net: videos showed Location (the video path writes -Keys:GPSCoordinates
+// with exiftool onto the FINAL container), images did not. This mirrors the
+// video approach for stills: build GPS exiftool args and write them onto the
+// FINAL file (HEIC or JPG) so Location survives. exiftool already writes EXIF to
+// HEIC here (MakerNote/CustomRendered), so GPS writes the same way.
+function _ldImageGpsExifArgs(lat, lon, altitudeM, captureDate) {
+  if (!isFinite(lat) || !isFinite(lon)) return null;
+  const args = [
+    `-GPSLatitude=${Math.abs(lat).toFixed(8)}`,
+    `-GPSLatitudeRef=${lat >= 0 ? 'N' : 'S'}`,
+    `-GPSLongitude=${Math.abs(lon).toFixed(8)}`,
+    `-GPSLongitudeRef=${lon >= 0 ? 'E' : 'W'}`,
+  ];
+  if (isFinite(altitudeM)) {
+    args.push(`-GPSAltitude=${Math.max(0, altitudeM).toFixed(3)}`);
+    args.push(`-GPSAltitudeRef=${altitudeM < 0 ? 1 : 0}`);
+  }
+  if (captureDate instanceof Date && !isNaN(captureDate)) {
+    const p = n => String(n).padStart(2, '0');
+    args.push(`-GPSDateStamp=${captureDate.getUTCFullYear()}:${p(captureDate.getUTCMonth() + 1)}:${p(captureDate.getUTCDate())}`);
+    args.push(`-GPSTimeStamp=${p(captureDate.getUTCHours())}:${p(captureDate.getUTCMinutes())}:${p(captureDate.getUTCSeconds())}`);
+  }
+  return args;
+}
+
+// Write GPS onto a finished image file (HEIC or JPG) via exiftool. No-op when
+// there are no coordinates (gpsMode 'off' / no editor pin). Best-effort: a GPS
+// write failure must never sink an export that otherwise succeeded.
+async function _ldWriteImageGps(invoke, filePath, lat, lon, altitudeM, captureDate) {
+  const gpsArgs = _ldImageGpsExifArgs(lat, lon, altitudeM, captureDate);
+  if (!gpsArgs) return false;
+  try {
+    await invoke('exiftool_run', { args: ['-overwrite_original', '-q', '-q', ...gpsArgs], filePath });
+    return true;
+  } catch (e) {
+    console.warn('[gps] image GPS write failed for', filePath, e);
+    return false;
+  }
+}
+
 async function enrichWithExiftool(jpegPath, opts) {
   if (!window.__TAURI__) return;
   const { invoke } = window.__TAURI__.core;
@@ -5915,6 +5958,15 @@ async function exportImage() {
       // AccelerationVector, ImageCaptureType, ImageUniqueID as 32-char HEX).
       // Also sets EXIF:CustomRendered=2 (HDR).
       await enrichHeicMakerNote(heicPath);
+      // v4.20.0: sips strips the GPS IFD too, so single-image HEIC exports lost
+      // Location. Re-author it from the editor's pin onto the final HEIC.
+      try {
+        const _cc = (typeof getGpsForExport === 'function') ? getGpsForExport() : null;
+        if (_cc && _cc.length === 2) {
+          await _ldWriteImageGps(invoke, heicPath, _cc[0], _cc[1], 5 + Math.random() * 45,
+            state.iphoneCaptureDate ? new Date(state.iphoneCaptureDate) : new Date());
+        }
+      } catch (ge) { console.warn('[gps] single-image GPS write failed:', ge); }
       const heicBytes = await invoke('read_temp_file', { path: heicPath });
       blob = new Blob([new Uint8Array(heicBytes)], { type: 'image/heic' });
       filename = filename.replace(/\.jpg$/i, '.HEIC');
@@ -9465,7 +9517,7 @@ function updateFilenamePreview() {
 // ============================================================================
 // V3.3: VIEW TAB SWITCHING (Editor / Inspector)
 // ============================================================================
-const APP_VERSION = '4.19.1';
+const APP_VERSION = '4.20.0';
 let currentView = 'editor';
 
 // Single source of truth for the header meta line. Format:
@@ -13869,6 +13921,15 @@ async function renderCarouselOutputs(onProgress) {
           // v4.11.5: post-HEIC MakerNote injection — see enrichHeicMakerNote()
           // docblock. Restores the 8 Apple tags sips strips during convert.
           await enrichHeicMakerNote(heicPath);
+          // v4.20.0: sips also strips the GPS IFD, so Location never survived on
+          // carousel HEICs. Re-author it from the editor's pin (the same coords
+          // buildIphoneExif baked into the JPEG above) onto the final HEIC.
+          try {
+            const _cc = (typeof getGpsForExport === 'function') ? getGpsForExport() : null;
+            if (_cc && _cc.length === 2) {
+              await _ldWriteImageGps(invoke, heicPath, _cc[0], _cc[1], 5 + Math.random() * 45, captureDates[i]);
+            }
+          } catch (ge) { console.warn('[gps] carousel GPS write failed for', item.name, ge); }
           const heicBytes = await invoke('read_temp_file', { path: heicPath });
           blob = new Blob([new Uint8Array(heicBytes)], { type: 'image/heic' });
           fname = fname.replace(/\.jpe?g$/i, '.HEIC');
@@ -17183,6 +17244,9 @@ async function launderImageFile(blob, cfg = {}) {
     const jpegPath = await invoke('write_temp_bytes', { dir: tmpDir, name: 'img.jpg', bytes: Array.from(jpegBytes) });
     try { await enrichWithExiftool(jpegPath, { captureDate: whenUtc, tz }); }
     catch (e) { console.warn('[launder] exiftool enrichment failed:', e); }
+    // v4.20.0: author the GPS onto the JPEG via exiftool too (authoritative, and
+    // the source the HEIC is built from). gps is the resolved city/random pin.
+    if (gps) await _ldWriteImageGps(invoke, jpegPath, gps.lat, gps.lon, gps.altitudeM, whenUtc);
     let outBytes, ext;
     if (cfg.imageFormat === 'jpg') {
       // v4.15.0: OUTPUT FORMAT = JPG → ship the fully tagged JPEG as-is (EXIF +
@@ -17196,6 +17260,9 @@ async function launderImageFile(blob, cfg = {}) {
         status('CONVERTING TO HEIC…');
         const heicPath = await invoke('jpeg_to_heic', { jpegPath });
         await enrichHeicMakerNote(heicPath);
+        // v4.20.0: sips strips EXIF on convert, so re-author GPS onto the HEIC —
+        // without this, Location never showed on laundered images (the bug).
+        if (gps) await _ldWriteImageGps(invoke, heicPath, gps.lat, gps.lon, gps.altitudeM, whenUtc);
         outBytes = new Uint8Array(await invoke('read_temp_file', { path: heicPath }));
         ext = 'HEIC';
       } catch (e) {
@@ -19982,6 +20049,21 @@ function ensureSettingsModal() {
 // const for easy maintenance — bump APP_VERSION + add an entry on each batch.
 // ============================================================================
 const PATCH_NOTES = [
+  {
+    version: '4.20.0',
+    date: '2026-10-18',
+    title: 'Location now shows on images (launder + carousels + single export)',
+    sections: [
+      { h: '📍 The fix', items: [
+        '📍 <b>Images never showed Location — videos did.</b> Image GPS was written only into the JPEG (via piexif), but the JPEG→HEIC convert (<code>sips</code>) strips all EXIF, and only the Apple MakerNote was being re-added afterward — the GPS was silently dropped. Videos never had this because they write GPS with exiftool onto the finished container.',
+        '✅ Images now do the same: after the HEIC is built, the GPS (latitude/longitude, ref, altitude, timestamp) is re-authored onto the <b>final file</b> with exiftool — so Location survives. Applied to <b>Launder</b>, <b>Carousels</b>, and the single-image iPhone HEIC export.',
+      ]},
+      { h: '🔎 Notes', items: [
+        '🔎 Launder uses the resolved city / random pin; Carousels and single-image use the editor\'s GPS pin. No pin / GPS off → no location written, as before.',
+        '🧱 JPG output already carried GPS and still does; this closes the gap on the default HEIC output.',
+      ]},
+    ],
+  },
   {
     version: '4.19.1',
     date: '2026-10-13',
